@@ -44,11 +44,13 @@ app = FastAPI(title="Spider_XHS 控制台")
 
 # 登录是阻塞流程（轮询扫码最多 180s），放到后台线程，前端轮询状态。
 _LOGIN: dict[str, Any] = {
-    "status": "idle",  # idle / pending / success / error
+    "status": "idle",  # idle / pending / success / error / conflict
     "message": "",
     "qr": None,
     "name": "",
     "nickname": "",
+    "conflict": None,
+    "warning": "",
     "started_at": 0.0,
     "run_id": 0,
 }
@@ -69,6 +71,10 @@ _MONITOR_LOCK = threading.Lock()
 _MONITOR_WAKE = threading.Event()
 _MONITOR_THREAD: threading.Thread | None = None
 _MONITOR_AUTH: dict[str, Any] = {}   # 监控线程专用的 Auth 缓存，避免每轮都重新 bootstrap
+
+# 扫码成功后先不落盘，等确认没有重名冲突再保存。
+# run_id -> {"cookies", "nickname", "user_id"}
+_PENDING_LOGIN: dict[int, dict] = {}
 
 # 新消息事件队列：SSE 推给前端，前端据此播放提示音 / 弹系统通知
 _EVENTS: list[dict] = []
@@ -126,6 +132,62 @@ def build_auth(name: str) -> XHSUnifiedAuth:
         raise RuntimeError(
             f"账号 {name} 登录态已失效（{exc}），请重新扫码登录"
         ) from exc
+
+
+def read_account_file(name: str) -> dict | None:
+    path = account_path(name)
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def find_account_by_user_id(user_id: str, exclude: str = "") -> dict | None:
+    """按小红书 user_id 查已保存的账号。
+
+    同一个号可能被存成多个名字（重复登录），所以去重必须看 user_id，
+    不能只看账号名。
+    """
+    if not user_id or not ACCOUNT_DIR.is_dir():
+        return None
+    for path in ACCOUNT_DIR.glob("*.json"):
+        if path.stem == exclude:
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if data.get("user_id") == user_id:
+            return data
+    return None
+
+
+def save_account_file(
+    name: str, cookies: str, nickname: str, user_id: str, **extra: Any
+) -> Path:
+    ACCOUNT_DIR.mkdir(exist_ok=True)
+    path = account_path(name)
+    payload = {
+        "name": name,
+        "cookies": cookies,
+        "nickname": nickname,
+        "user_id": user_id,
+        "saved_at": int(time.time()),
+        **extra,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def suggest_account_name(name: str) -> str:
+    """账号名已被别的号占用时，给一个可用的建议名：xxx-2 / xxx-3 …"""
+    for i in range(2, 100):
+        candidate = f"{name}-{i}"
+        if not account_path(candidate).is_file():
+            return candidate
+    return f"{name}-{int(time.time())}"
 
 
 def qr_data_url(url: str) -> str:
@@ -437,23 +499,57 @@ def _login_worker(name: str, run_id: int) -> None:
             except Exception:
                 pass
 
-            ACCOUNT_DIR.mkdir(exist_ok=True)
-            payload = {
-                "name": name,
+            # 扫码结果先暂存，确认没有重名冲突再落盘。
+            # 直接按账号名写文件的话，「同名但不同号」会静默顶掉上一个账号。
+            _PENDING_LOGIN[run_id] = {
                 "cookies": auth.pc_auth.cookies,
-                "saved_at": int(time.time()),
                 "nickname": nickname,
                 "user_id": user_id,
             }
-            account_path(name).write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
+
+            existing = read_account_file(name)
+            if (
+                existing
+                and user_id
+                and existing.get("user_id")
+                and existing["user_id"] != user_id
+            ):
+                _set_login(
+                    run_id,
+                    status="conflict",
+                    message=(
+                        f"账号名「{name}」已经属于「{existing.get('nickname') or '另一个账号'}」，"
+                        f"而这次扫码登录的是「{nickname or '未知'}」。"
+                    ),
+                    nickname=nickname,
+                    qr=None,
+                    conflict={
+                        "name": name,
+                        "existing_nickname": existing.get("nickname") or "",
+                        "existing_user_id": existing.get("user_id") or "",
+                        "new_nickname": nickname,
+                        "new_user_id": user_id,
+                        "suggest": suggest_account_name(name),
+                    },
+                )
+                return
+
+            duplicated = find_account_by_user_id(user_id, exclude=name)
+            save_account_file(name, auth.pc_auth.cookies, nickname, user_id)
+            _PENDING_LOGIN.pop(run_id, None)
             _set_login(
                 run_id,
                 status="success",
                 message=f"登录成功：{nickname or name}",
                 nickname=nickname,
                 qr=None,
+                warning=(
+                    f"同一个账号之前已保存为「{duplicated.get('name')}」，现在多存了一份，"
+                    "不需要的话可以在账号列表里删掉一个。"
+                    if duplicated
+                    else ""
+                ),
+                conflict=None,
             )
         finally:
             auth.close()
@@ -480,6 +576,8 @@ def api_login_start(name: str = Form(...), force: bool = Form(False)) -> Any:
                 "qr": None,
                 "name": name,
                 "nickname": "",
+                "conflict": None,
+                "warning": "",
                 "started_at": time.time(),
             }
         )
@@ -498,11 +596,65 @@ def api_login_cancel() -> Any:
                 "qr": None,
                 "name": "",
                 "nickname": "",
+                "conflict": None,
+                "warning": "",
                 "started_at": 0.0,
                 "run_id": int(_LOGIN.get("run_id") or 0) + 1,
             }
         )
     return {"ok": True}
+
+
+@app.post("/api/login/save")
+def api_login_save(payload: dict) -> Any:
+    """扫码成功后由用户确认账号名，这里才真正落盘。
+
+    用于处理「同名但不同号」的冲突：可以换个名字保存，也可以明确选择覆盖。
+    结果暂存在内存里，所以不需要重新扫码。
+    """
+    try:
+        run_id = int(payload.get("run_id") or 0)
+    except (TypeError, ValueError):
+        return err("run_id 无效")
+
+    name = (payload.get("name") or "").strip()
+    overwrite = bool(payload.get("overwrite"))
+    if not name:
+        return err("请填写账号名")
+    try:
+        account_path(name)  # 触发账号名的合法性校验
+    except ValueError as exc:
+        return err(str(exc))
+
+    pending = _PENDING_LOGIN.get(run_id)
+    if not pending:
+        return err("这次登录的结果已经失效，请重新扫码")
+
+    user_id = pending.get("user_id") or ""
+    existing = read_account_file(name)
+    if (
+        existing
+        and not overwrite
+        and user_id
+        and existing.get("user_id")
+        and existing["user_id"] != user_id
+    ):
+        return err(
+            f"账号名「{name}」已经被「{existing.get('nickname') or '另一个账号'}」占用。"
+            "请换个名字，或勾选覆盖。"
+        )
+
+    save_account_file(name, pending["cookies"], pending.get("nickname", ""), user_id)
+    _PENDING_LOGIN.pop(run_id, None)
+    _set_login(
+        run_id,
+        status="success",
+        message=f"已保存为「{name}」",
+        nickname=pending.get("nickname", ""),
+        conflict=None,
+        warning="",
+    )
+    return {"ok": True, "name": name}
 
 
 @app.get("/api/login/state")

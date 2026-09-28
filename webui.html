@@ -84,6 +84,10 @@
     box-shadow:0 6px 20px rgba(0,0,0,.18); animation:pop .2s ease-out; }
   @keyframes pop { from { transform:translateY(8px); opacity:0 } to { transform:none; opacity:1 } }
   .tablewrap { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  #conflictBox { display:none; margin-top:14px; padding:14px 16px; border-radius:10px;
+    border:1px solid #ffd2d8; background:#fff6f7; }
+  #conflictBox b { color:var(--brand); }
+  #conflictBox p { margin:8px 0 12px; }
 
   /* ---------- 手机 / 窄屏适配 ---------- */
   @media (max-width: 860px) {
@@ -161,6 +165,22 @@
         <p id="loginMsg" class="muted">正在获取二维码...</p>
         <img id="qrImg" alt="登录二维码">
         <p class="muted">用小红书 App 扫码并在手机上确认</p>
+      </div>
+      <div id="conflictBox">
+        <b id="conflictTitle">账号名冲突</b>
+        <p id="conflictDesc" class="muted"></p>
+        <div class="row">
+          <div class="field grow" style="max-width:280px">
+            <label>换个名字保存</label>
+            <input id="conflictName">
+          </div>
+          <button id="btnConflictRename">用这个名字保存</button>
+          <button class="ghost" id="btnConflictOverwrite">覆盖原账号</button>
+        </div>
+        <p class="muted" style="margin:10px 0 0">
+          覆盖会永久丢弃被占用账号的登录态（只能重新扫码恢复）。
+          不需要重新扫码，这次扫到的登录态还在内存里。
+        </p>
       </div>
       <div class="msg" id="accountMsg"></div>
     </div>
@@ -336,6 +356,7 @@ const state = {
   accounts: [], materials: [], pickedMaterials: new Set(),
   chatUser: "", dmAccount: "", editingMaterial: "",
   monitor: {}, prevUnread: {}, monitorReady: false,
+  conflict: null,
 };
 
 const fmtTime = (ms) => {
@@ -406,11 +427,13 @@ async function loadAccounts() {
 }
 
 let loginTimer = null;
+let lastRunId = 0;
 
 async function startLogin(force) {
   const name = $("newAccount").value.trim();
   if (!name) return showMsg($("accountMsg"), "先填一个账号名", false);
   hideMsg($("accountMsg"));
+  $("conflictBox").style.display = "none";
   $("qrBox").style.display = "block";
   $("qrImg").removeAttribute("src");
   $("loginMsg").textContent = "正在获取二维码...";
@@ -431,9 +454,49 @@ $("btnResetLogin").onclick = async () => {
   if (loginTimer) { clearInterval(loginTimer); loginTimer = null; }
   try { await api("/api/login/cancel", { method: "POST" }); } catch {}
   $("qrBox").style.display = "none";
+  $("conflictBox").style.display = "none";
   showMsg($("accountMsg"), "已重置登录状态，可以重新扫码", true);
   const name = $("newAccount").value.trim();
   if (name) startLogin(true);
+};
+
+/* 同名但不同号：不静默覆盖，交给用户决定 */
+function showConflict(s) {
+  const c = s.conflict || {};
+  lastRunId = s.run_id || 0;
+  $("conflictTitle").textContent = `账号名「${c.name || ""}」已被占用`;
+  $("conflictDesc").textContent =
+    `「${c.name || ""}」现在是「${c.existing_nickname || "另一个账号"}」，`
+    + `这次扫码登录的是「${c.new_nickname || "未知"}」。`
+    + `两者是不同的账号，直接保存会顶掉原来那个。`;
+  $("conflictName").value = c.suggest || ((c.name || "account") + "-2");
+  $("qrBox").style.display = "none";
+  $("conflictBox").style.display = "block";
+}
+
+async function saveConflict(overwrite) {
+  const c = state.conflict || {};
+  const name = overwrite ? (c.name || "") : $("conflictName").value.trim();
+  if (!name) return showMsg($("accountMsg"), "请填写账号名", false);
+  try {
+    await api("/api/login/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run_id: lastRunId, name, overwrite }),
+    });
+    $("conflictBox").style.display = "none";
+    showMsg($("accountMsg"), `已保存为「${name}」`, true);
+    await loadAccounts();
+    pollMonitor();
+  } catch (e) {
+    showMsg($("accountMsg"), e.message, false);
+  }
+}
+
+$("btnConflictRename").onclick = () => saveConflict(false);
+$("btnConflictOverwrite").onclick = () => {
+  if (!confirm("确定覆盖吗？被占用账号的登录态会被永久丢弃，只能重新扫码恢复。")) return;
+  saveConflict(true);
 };
 
 function pollLogin() {
@@ -442,9 +505,16 @@ function pollLogin() {
     let s; try { s = await api("/api/login/state"); } catch { return; }
     if (s.qr) $("qrImg").src = s.qr;
     if (s.message) $("loginMsg").textContent = s.message;
+    if (s.status !== "idle") lastRunId = s.run_id || lastRunId;
     if (s.status === "success") {
       clearInterval(loginTimer); loginTimer = null; $("qrBox").style.display = "none";
-      showMsg($("accountMsg"), s.message, true); loadAccounts();
+      $("conflictBox").style.display = "none";
+      showMsg($("accountMsg"), s.message + (s.warning ? "　⚠️ " + s.warning : ""), true);
+      loadAccounts();
+    } else if (s.status === "conflict") {
+      clearInterval(loginTimer); loginTimer = null;
+      state.conflict = s.conflict || {};
+      showConflict(s);
     } else if (s.status === "error") {
       clearInterval(loginTimer); loginTimer = null;
       showMsg($("accountMsg"), s.message, false);
@@ -961,6 +1031,21 @@ loadAccounts();
 loadMaterials();
 updateNotifyBtn();
 connectEvents();
+
+// 刷新页面后如果登录流程还在等扫码、或停在「账号名冲突」，继续显示对应界面
+(async () => {
+  try {
+    const s = await api("/api/login/state");
+    if (s.status === "pending") {
+      $("qrBox").style.display = "block";
+      pollLogin();
+    } else if (s.status === "conflict") {
+      state.conflict = s.conflict || {};
+      showConflict(s);
+      switchTab("accounts");
+    }
+  } catch {}
+})();
 
 // 每 5 秒拉一次监控状态；勾选「自动刷新」即可在任意页签收到新消息提示
 setInterval(() => { if ($("dmAuto").checked) pollMonitor(); }, 5000);
