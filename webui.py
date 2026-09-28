@@ -462,6 +462,44 @@ def api_account_delete(name: str) -> Any:
     return {"ok": True}
 
 
+@app.post("/api/accounts/{name}/rename")
+def api_account_rename(name: str, payload: dict) -> Any:
+    """改本地账号名（就是 accounts/ 下的文件名），不影响小红书账号本身。
+
+    Cookie、user_id 全部原样保留，只是换个你自己看得懂的名字。
+    """
+    new_name = (payload.get("new_name") or "").strip()
+    if not new_name:
+        return err("请填写新的账号名")
+    try:
+        new_path = account_path(new_name)
+        old_path = account_path(name)
+    except ValueError as exc:
+        return err(str(exc))
+
+    if not old_path.is_file():
+        return err(f"账号「{name}」不存在", 404)
+    if new_name == name:
+        return {"ok": True, "name": new_name, "unchanged": True}
+    if new_path.exists():
+        return err(f"账号名「{new_name}」已经被占用了，换一个吧")
+
+    data = read_account_file(name) or {}
+    data["name"] = new_name
+    data["renamed_at"] = int(time.time())
+    new_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    old_path.unlink()
+
+    # 监控缓存用账号名做 key，同步搬过去，避免要等下一轮抓取
+    with _MONITOR_LOCK:
+        if name in _MONITOR["accounts"]:
+            _MONITOR["accounts"][new_name] = _MONITOR["accounts"].pop(name)
+    if name in _MONITOR_AUTH:
+        _MONITOR_AUTH[new_name] = _MONITOR_AUTH.pop(name)
+
+    return {"ok": True, "name": new_name, "old_name": name}
+
+
 def _set_login(run_id: int, **fields: Any) -> None:
     """只允许「当前这一轮」登录流程写状态，防止旧线程回来覆盖新流程。"""
     with _LOGIN_LOCK:
@@ -1435,6 +1473,23 @@ if __name__ == "__main__":
 
         ctypes.windll.kernel32.SetConsoleTitleW("小红书控制台")
     except Exception:
+        pass
+
+    # 已经有实例在跑？那就只打开浏览器，不要再起一个。
+    # Windows 的 SO_REUSEADDR 允许两个进程绑定同一端口，第二个实例会
+    # 「看起来启动成功」，但请求仍然由第一个进程处理 —— 结果就是你改了代码
+    # 却没生效，或者关掉一个窗口服务还在跑，非常难排查。
+    try:
+        with socket.create_connection(("127.0.0.1", LISTEN_PORT), timeout=0.6):
+            print(f"控制台已经在运行了，直接为你打开 http://127.0.0.1:{LISTEN_PORT}")
+            try:
+                import webbrowser
+
+                webbrowser.open(f"http://127.0.0.1:{LISTEN_PORT}")
+            except Exception:
+                pass
+            raise SystemExit(0)
+    except OSError:
         pass
 
     sockets = []

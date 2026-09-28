@@ -155,7 +155,7 @@
     <div class="card">
       <div class="row">
         <div class="field grow">
-          <label>新增账号名（自定义，例如 main / work）</label>
+          <label>新增账号名（仅本地显示，例如 main / work，不影响小红书账号）</label>
           <input id="newAccount" placeholder="main">
         </div>
         <button id="btnLogin">扫码登录</button>
@@ -399,8 +399,39 @@ async function loadAccounts() {
     const tr = document.createElement("tr");
     tr.innerHTML = `<td><span class="tag">${a.name}</span></td><td>${a.nickname||"-"}</td>
       <td class="muted">${a.user_id||"-"}</td><td class="muted">${fmtTime(a.saved_at*1000)}</td>
-      <td><button class="ghost" data-del="${a.name}">删除</button></td>`;
+      <td style="white-space:nowrap">
+        <button class="ghost" data-rename="${a.name}" style="padding:4px 10px">改名</button>
+        <button class="ghost" data-del="${a.name}" style="padding:4px 10px">删除</button>
+      </td>`;
     rows.appendChild(tr);
+  });
+  rows.querySelectorAll("[data-rename]").forEach((b) => {
+    b.onclick = async () => {
+      const oldName = b.dataset.rename;
+      const acc = state.accounts.find((x) => x.name === oldName) || {};
+      const input = prompt(
+        `给「${acc.nickname || oldName}」换个本地账号名\n`
+        + `（只改你在控制台里看到的名字，不影响小红书账号，登录态原样保留）`,
+        oldName
+      );
+      if (input === null) return;                 // 用户取消
+      const newName = input.trim();
+      if (!newName || newName === oldName) return;
+      try {
+        await api(`/api/accounts/${encodeURIComponent(oldName)}/rename`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ new_name: newName }),
+        });
+        // 私信页可能正指着旧名字，清掉避免取不到数据
+        if (state.dmAccount === oldName) { state.dmAccount = ""; state.chatUser = ""; }
+        showMsg($("accountMsg"), `已把「${oldName}」改名为「${newName}」`, true);
+        await loadAccounts();
+        pollMonitor();
+      } catch (e) {
+        showMsg($("accountMsg"), e.message, false);
+      }
+    };
   });
   rows.querySelectorAll("[data-del]").forEach((b) => {
     b.onclick = async () => {
