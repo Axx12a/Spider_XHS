@@ -472,6 +472,11 @@ def api_account_delete(name: str) -> Any:
     path = account_path(name)
     if path.is_file():
         path.unlink()
+    # 同步清掉监控缓存，否则账号删了列表里还在
+    _MONITOR_AUTH.pop(name, None)
+    with _MONITOR_LOCK:
+        _MONITOR["accounts"].pop(name, None)
+        _MONITOR["updated_at"] = time.time()
     return {"ok": True}
 
 
@@ -588,6 +593,7 @@ def _login_worker(name: str, run_id: int) -> None:
             duplicated = find_account_by_user_id(user_id, exclude=name)
             save_account_file(name, auth.pc_auth.cookies, nickname, user_id)
             _PENDING_LOGIN.pop(run_id, None)
+            _reset_monitor_account(name)
             _set_login(
                 run_id,
                 status="success",
@@ -697,6 +703,7 @@ def api_login_save(payload: dict) -> Any:
 
     save_account_file(name, pending["cookies"], pending.get("nickname", ""), user_id)
     _PENDING_LOGIN.pop(run_id, None)
+    _reset_monitor_account(name)
     _set_login(
         run_id,
         status="success",
@@ -1027,6 +1034,22 @@ def _mark_read_sync(live, user_id: str | None) -> dict:
         chat_list, chat_total_unread_count=max(0, total - cleared)
     )
     return {"cleared": cleared, "result": result}
+
+
+def _reset_monitor_account(name: str) -> None:
+    """账号刚登录/覆盖/改名后，立刻清掉监控里的旧状态。
+
+    扫码登录流程最后一步会验证正式会话（guest 必须为 False），所以此刻
+    登录态确定是有效的。如果不清，界面会继续显示上一轮的「需要重新登录」，
+    直到下一轮抓取（最多十几秒）才更新 —— 用户会以为覆盖没生效，反复重登。
+    """
+    _MONITOR_AUTH.pop(name, None)
+    with _MONITOR_LOCK:
+        info = _MONITOR["accounts"].get(name)
+        if info is not None:
+            info.update({"error": "", "error_kind": "", "error_count": 0})
+            _MONITOR["updated_at"] = time.time()
+    _MONITOR_WAKE.set()  # 让监控线程立刻重抓一次
 
 
 def _clear_monitor_unread(name: str, user_id: str | None, cleared: int) -> None:
