@@ -51,3 +51,11 @@ _live_session.json
 /_scratch/
 
 creator_cookie.json
+
+# xhs_cli.py 保存的多账号登录态，含敏感 Cookie，绝不提交
+/accounts/
+
+# 控制台设置，含钉钉 Webhook / 加签密钥
+/settings.json
+/library/
+/uploads/

@@ -1,0 +1,21 @@
+services:
+  spider:
+    build: .
+    image: spider_xhs:local
+    container_name: spider-xhs
+    # 扫码登录要把二维码打在终端里，必须保留交互式 TTY，否则看不到二维码
+    stdin_open: true
+    tty: true
+    env_file:
+      # COOKIES='...' 放在这里即可免登录（cookie 模式）
+      - .env
+    volumes:
+      # 采集结果 / 导出的 Excel
+      - ./datas:/app/datas
+      # 待发布的图片、视频放这里，demo.py 里写容器内路径 /app/media/xxx.jpg
+      - ./media:/app/media
+    # 可选：走宿主机代理降低风控
+    # environment:
+    #   HTTP_PROXY: http://host.docker.internal:7890
+    #   HTTPS_PROXY: http://host.docker.internal:7890
+    command: python demo.py
