@@ -11,3 +11,12 @@ aiohttp
 opencv-python
 numpy
 qrcode
+
+# ---- 网页控制台（webui.py）额外需要 ----
+fastapi
+uvicorn[standard]
+# FastAPI 解析表单和文件上传要用，代码里不直接 import，漏了会在
+# 上传图片时报 "Form data requires python-multipart to be installed"
+python-multipart
+# qrcode.make() 生成登录二维码图片要用 PIL
+Pillow

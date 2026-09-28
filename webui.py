@@ -726,7 +726,16 @@ def material_to_note(material: dict, privacy: int, post_time: int | None) -> dic
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
     html = (ROOT / "webui.html").read_text(encoding="utf-8")
-    return HTMLResponse(html)
+    # 必须禁缓存：这个页面是本地开发用的，改完刷新就该看到新版。
+    # 之前没设这个头，浏览器会启发式缓存，导致改完还是显示旧界面。
+    return HTMLResponse(
+        html,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1482,35 +1491,70 @@ def api_notes(name: str) -> Any:
 
 @app.post("/api/notes/delete")
 def api_note_delete(payload: dict) -> Any:
-    name = (payload.get("name") or "").strip()
-    raw = payload.get("note_ids")
-    if raw is None:
-        single = (payload.get("note_id") or "").strip()
-        raw = [single] if single else []
-    note_ids = [str(i).strip() for i in raw if str(i).strip()]
-    if not name or not note_ids:
-        return err("缺少账号或笔记 ID")
+    """删除已发布笔记，支持一次跨多个账号。
+
+    新格式：{"items": [{"name": "main", "note_id": "..."}, ...]}
+    同时兼容旧的 {"name": ..., "note_ids": [...]} / {"name": ..., "note_id": ...}
+    """
+    raw_items = payload.get("items")
+    if not raw_items:
+        name = (payload.get("name") or "").strip()
+        ids = payload.get("note_ids")
+        if ids is None:
+            single = (payload.get("note_id") or "").strip()
+            ids = [single] if single else []
+        raw_items = [{"name": name, "note_id": i} for i in ids]
+
+    items: list[tuple[str, str]] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        note_id = str(item.get("note_id") or "").strip()
+        if name and note_id:
+            items.append((name, note_id))
+    if not items:
+        return err("没有要删除的笔记")
+
+    # 按账号分组：同一个账号只登录一次
+    grouped: dict[str, list[str]] = {}
+    for name, note_id in items:
+        grouped.setdefault(name, []).append(note_id)
+
     try:
         from apis.xhs_creator_apis import XHS_Creator_Apis
 
-        auth = build_auth(name)   # 复用同一个会话，避免每条都重新登录一次
-        try:
-            api = XHS_Creator_Apis(auth.creator).bootstrap()
-            results: list[dict] = []
-            for index, note_id in enumerate(note_ids):
-                try:
-                    success, message, _ = api.delete_note(note_id)
+        results: list[dict] = []
+        for name, note_ids in grouped.items():
+            try:
+                auth = build_auth(name)
+            except Exception as exc:
+                for note_id in note_ids:
                     results.append(
-                        {"note_id": note_id, "ok": bool(success), "message": str(message)}
+                        {"account": name, "note_id": note_id, "ok": False, "message": str(exc)}
                     )
-                except Exception as exc:
-                    results.append(
-                        {"note_id": note_id, "ok": False, "message": str(exc)}
-                    )
-                if index < len(note_ids) - 1:
-                    time.sleep(random.uniform(1.5, 3.0))   # 别连着猛点删除
-        finally:
-            auth.close()
+                continue
+            try:
+                api = XHS_Creator_Apis(auth.creator).bootstrap()
+                for index, note_id in enumerate(note_ids):
+                    try:
+                        success, message, _ = api.delete_note(note_id)
+                        results.append(
+                            {
+                                "account": name,
+                                "note_id": note_id,
+                                "ok": bool(success),
+                                "message": str(message),
+                            }
+                        )
+                    except Exception as exc:
+                        results.append(
+                            {"account": name, "note_id": note_id, "ok": False, "message": str(exc)}
+                        )
+                    if index < len(note_ids) - 1:
+                        time.sleep(random.uniform(1.5, 3.0))   # 别连着猛点删除
+            finally:
+                auth.close()
         succeeded = sum(1 for r in results if r["ok"])
         return {
             "ok": True,
