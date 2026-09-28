@@ -208,6 +208,70 @@
   <!-- ============ 素材库 ============ -->
   <section class="panel" id="panel-library">
     <div class="card">
+      <h3 style="margin:0 0 6px;font-size:15px">AI 生成素材</h3>
+      <p class="muted" style="margin:0 0 14px">
+        给一个主题，自动生成标题、正文、话题和配图，直接存进素材库。
+        用的是你自己配置的模型接口，不经过任何第三方中转。
+      </p>
+      <div class="row">
+        <div class="field grow"><label>主题（必填）</label>
+          <input id="aiTopic" placeholder="例如：秋冬平价保湿面霜推荐"></div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <div class="field grow"><label>风格</label>
+          <input id="aiStyle" list="aiStyleList" placeholder="种草分享">
+          <datalist id="aiStyleList">
+            <option value="种草分享"></option>
+            <option value="干货教程"></option>
+            <option value="生活记录"></option>
+            <option value="情绪共鸣"></option>
+            <option value="测评对比"></option>
+            <option value="避坑指南"></option>
+          </datalist>
+        </div>
+        <div class="field"><label>配图数量</label>
+          <input id="aiImageCount" type="number" min="0" max="6" value="2" style="width:110px"></div>
+        <button id="btnAiGenerate">生成素材</button>
+      </div>
+      <div class="msg" id="aiMsg"></div>
+
+      <details style="margin-top:14px">
+        <summary class="muted" style="cursor:pointer">AI 接口配置（首次使用必须填）</summary>
+        <div class="row" style="margin-top:12px">
+          <div class="field grow"><label>文案 Base URL</label>
+            <input id="aiTextBase" placeholder="https://api.deepseek.com/v1"></div>
+          <div class="field grow"><label>文案模型</label>
+            <input id="aiTextModel" placeholder="deepseek-chat"></div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <div class="field grow"><label>文案 API Key</label>
+            <input id="aiTextKey" type="password" placeholder="sk-..."></div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <div class="field grow"><label>绘图 Base URL</label>
+            <input id="aiImageBase" placeholder="https://open.bigmodel.cn/api/paas/v4"></div>
+          <div class="field grow"><label>绘图模型</label>
+            <input id="aiImageModel" placeholder="cogview-3-flash"></div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <div class="field grow"><label>绘图 API Key</label>
+            <input id="aiImageKey" type="password"></div>
+          <div class="field"><label>图片尺寸</label>
+            <input id="aiImageSize" placeholder="1024x1536" style="width:150px"></div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button id="btnAiSave">保存配置</button>
+        </div>
+        <p class="muted" style="margin:10px 0 0">
+          两边都走 OpenAI 兼容协议：<code>/chat/completions</code> 和
+          <code>/images/generations</code> 会接在 Base URL 后面。
+          配图留空则只生成文案。
+        </p>
+        <div class="msg" id="aiCfgMsg"></div>
+      </details>
+    </div>
+
+    <div class="card">
       <h3 style="margin:0 0 14px;font-size:15px" id="matFormTitle">新建素材</h3>
       <div class="row">
         <div class="field grow"><label>标题</label><input id="matTitle" placeholder="笔记标题"></div>
@@ -671,6 +735,66 @@ function pollLogin() {
 }
 
 /* ---------------- 素材库 ---------------- */
+async function loadAiConfig() {
+  try {
+    const { ai } = await api("/api/settings/ai");
+    $("aiTextBase").value = ai.text_base_url || "";
+    $("aiTextModel").value = ai.text_model || "";
+    $("aiTextKey").value = ai.text_api_key || "";
+    $("aiImageBase").value = ai.image_base_url || "";
+    $("aiImageModel").value = ai.image_model || "";
+    $("aiImageKey").value = ai.image_api_key || "";
+    $("aiImageSize").value = ai.image_size || "";
+  } catch {}
+}
+
+$("btnAiSave").onclick = async () => {
+  try {
+    await api("/api/settings/ai", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text_base_url: $("aiTextBase").value.trim(),
+        text_model: $("aiTextModel").value.trim(),
+        text_api_key: $("aiTextKey").value.trim(),
+        image_base_url: $("aiImageBase").value.trim(),
+        image_model: $("aiImageModel").value.trim(),
+        image_api_key: $("aiImageKey").value.trim(),
+        image_size: $("aiImageSize").value.trim(),
+      }),
+    });
+    showMsg($("aiCfgMsg"), "AI 配置已保存", true);
+  } catch (e) { showMsg($("aiCfgMsg"), e.message, false); }
+};
+
+$("btnAiGenerate").onclick = async () => {
+  const msg = $("aiMsg");
+  const topic = $("aiTopic").value.trim();
+  if (!topic) return showMsg(msg, "先填一个主题", false);
+  const count = Math.max(0, Number($("aiImageCount").value) || 0);
+  $("btnAiGenerate").disabled = true;
+  showMsg(msg, count
+    ? "正在生成文案和配图，配图通常要几十秒，请稍等..."
+    : "正在生成文案...", true);
+  try {
+    const r = await api("/api/ai/generate", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ topic, style: $("aiStyle").value.trim(), image_count: count }),
+    });
+    const n = (r.material.images || []).length;
+    let text = `已生成《${r.material.title}》`;
+    text += n ? `，配图 ${n} 张，已存入素材库` : "，未见配图";
+    const errs = r.image_errors || [];
+    if (errs.length) text += `　⚠️ ${errs.length} 张配图失败：${errs[0]}`;
+    showMsg(msg, text, !(count && errs.length && !n));
+    $("aiTopic").value = "";
+    loadMaterials();
+  } catch (e) {
+    showMsg(msg, e.message, false);
+  } finally {
+    $("btnAiGenerate").disabled = false;
+  }
+};
+
 async function loadMaterials() {
   const { materials } = await api("/api/library");
   state.materials = materials;
@@ -1248,6 +1372,7 @@ loadDingtalk();
 
 loadAccounts();
 loadMaterials();
+loadAiConfig();
 updateNotifyBtn();
 connectEvents();
 

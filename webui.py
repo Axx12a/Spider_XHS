@@ -254,7 +254,18 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "at_mobiles": "",
         "at_all": False,
         "accounts": "",
-    }
+    },
+    # AI 生成素材用。文案和绘图分开配置，可以混用不同服务商。
+    # 都走 OpenAI 兼容接口，所以换服务商只需要改 base_url / model。
+    "ai": {
+        "text_base_url": "https://api.deepseek.com/v1",
+        "text_api_key": "",
+        "text_model": "deepseek-chat",
+        "image_base_url": "",
+        "image_api_key": "",
+        "image_model": "",
+        "image_size": "1024x1536",
+    },
 }
 
 
@@ -373,6 +384,212 @@ def notify_dingtalk(account: str, account_nick: str, chat: dict) -> None:
             print(f"[dingtalk] 推送失败：{msg}")
 
     threading.Thread(target=worker, daemon=True).start()
+
+
+# --------------------------------------------------------------------------- #
+# AI 生成素材（OpenAI 兼容接口）
+#
+# 文案和绘图分成两套配置，因为常见组合是「DeepSeek 写文案 + 智谱/硅基流动画图」。
+# 两边分别打 OpenAI 的 /chat/completions 与 /images/generations，
+# 换服务商只要改 base_url 和 model，不用动代码。
+# --------------------------------------------------------------------------- #
+
+
+def ai_config() -> dict:
+    cfg = dict(DEFAULT_SETTINGS["ai"])
+    cfg.update(load_settings().get("ai") or {})
+    return cfg
+
+
+def _openai_post(base_url: str, path: str, key: str, payload: dict, timeout: float = 180):
+    import requests
+
+    url = base_url.rstrip("/") + path
+    resp = requests.post(
+        url,
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=timeout,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
+    return resp.json()
+
+
+def _parse_json_block(text: str) -> dict:
+    """模型经常把 JSON 包在 ``` 里或前后带解释，这里做容错解析。"""
+    raw = (text or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-zA-Z]*\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
+    except json.JSONDecodeError:
+        pass
+    start, end = raw.find("{"), raw.rfind("}")
+    if start >= 0 and end > start:
+        data = json.loads(raw[start : end + 1])
+        if isinstance(data, dict):
+            return data
+    raise RuntimeError("模型没有返回可解析的 JSON")
+
+
+def ai_write_note(topic: str, style: str, count: int, cfg: dict) -> dict:
+    if not (cfg.get("text_api_key") or "").strip():
+        raise RuntimeError("还没有配置文案模型的 API Key")
+
+    system = (
+        "你是资深小红书运营，擅长写高互动率的图文笔记。"
+        "只输出 JSON，不要解释、不要代码块标记。"
+    )
+    user = (
+        f"主题：{topic}\n"
+        f"风格：{style or '种草分享'}\n"
+        f"需要配图数量：{count}\n\n"
+        "输出这个 JSON：\n"
+        "{\n"
+        '  "title": "标题，20 字以内，有钩子",\n'
+        '  "desc": "正文，250-450 字，分 3-5 段，口语化，可带 emoji，结尾引导评论",\n'
+        '  "topics": ["话题1", "话题2"],\n'
+        '  "image_prompts": ["英文绘图提示词"]\n'
+        "}\n"
+        "topics 给 5-8 个，不带 # 号。\n"
+        f"image_prompts 数量必须等于 {count}，每个描述具体画面、构图、色调，"
+        "是给文生图模型用的英文提示词，画面里不要出现文字或水印。"
+    )
+    data = _openai_post(
+        cfg["text_base_url"],
+        "/chat/completions",
+        cfg["text_api_key"],
+        {
+            "model": cfg["text_model"],
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": 0.9,
+        },
+    )
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError(f"文案接口返回结构异常：{str(data)[:200]}") from exc
+    return _parse_json_block(content)
+
+
+def ai_make_image(prompt: str, cfg: dict) -> bytes:
+    import requests
+
+    if not (cfg.get("image_api_key") or "").strip():
+        raise RuntimeError("还没有配置绘图模型的 API Key")
+    data = _openai_post(
+        cfg["image_base_url"],
+        "/images/generations",
+        cfg["image_api_key"],
+        {
+            "model": cfg["image_model"],
+            "prompt": prompt,
+            "n": 1,
+            "size": cfg.get("image_size") or "1024x1024",
+        },
+    )
+    items = data.get("data") or []
+    item = items[0] if items else {}
+    if item.get("b64_json"):
+        return base64.b64decode(item["b64_json"])
+    url = item.get("url")
+    if not url:
+        raise RuntimeError(f"绘图接口没有返回图片：{str(data)[:200]}")
+    resp = requests.get(url, timeout=180)
+    resp.raise_for_status()
+    return resp.content
+
+
+@app.post("/api/ai/generate")
+def api_ai_generate(payload: dict) -> Any:
+    topic = (payload.get("topic") or "").strip()
+    if not topic:
+        return err("请先填写主题")
+    style = (payload.get("style") or "").strip()
+    try:
+        count = max(0, min(6, int(payload.get("image_count", 2))))
+    except (TypeError, ValueError):
+        count = 2
+
+    cfg = ai_config()
+    try:
+        note = ai_write_note(topic, style, count, cfg)
+    except Exception as exc:
+        return err(f"文案生成失败：{exc}")
+
+    title = str(note.get("title") or topic).strip()
+    desc = str(note.get("desc") or "").strip()
+    topics = [str(t).lstrip("#").strip() for t in (note.get("topics") or []) if str(t).strip()]
+    prompts = [str(p).strip() for p in (note.get("image_prompts") or []) if str(p).strip()][:count]
+
+    # 配图并发生成：逐张串行会等到天荒地老
+    images: list[str] = []
+    image_errors: list[str] = []
+    if count and prompts and (cfg.get("image_api_key") or "").strip():
+        from concurrent.futures import ThreadPoolExecutor
+
+        LIBRARY_MEDIA.mkdir(parents=True, exist_ok=True)
+        stamp = str(int(time.time() * 1000))
+        with ThreadPoolExecutor(max_workers=min(4, len(prompts))) as pool:
+            futures = {pool.submit(ai_make_image, p, cfg): i for i, p in enumerate(prompts)}
+            blobs: dict[int, bytes] = {}
+            for future, index in futures.items():
+                try:
+                    blobs[index] = future.result()
+                except Exception as exc:
+                    image_errors.append(str(exc))
+        for index in sorted(blobs):
+            target = LIBRARY_MEDIA / f"{stamp}_ai{index}.png"
+            target.write_bytes(blobs[index])
+            images.append(str(target))
+
+    material = {
+        "id": str(int(time.time() * 1000)),
+        "title": title,
+        "desc": desc,
+        "topics": topics,
+        "location": "",
+        "created_at": int(time.time()),
+        "media_type": "image",
+        "images": images,
+        "source": "ai",
+        "ai_topic": topic,
+        "ai_style": style,
+    }
+    if images:
+        items = load_library()
+        items.insert(0, material)
+        save_library(items)
+
+    return {
+        "ok": True,
+        "material": material,
+        "saved": bool(images),
+        "image_errors": image_errors,
+    }
+
+
+@app.get("/api/settings/ai")
+def api_ai_get() -> Any:
+    return {"ok": True, "ai": ai_config()}
+
+
+@app.post("/api/settings/ai")
+def api_ai_save(payload: dict) -> Any:
+    data = load_settings()
+    cfg = data.setdefault("ai", {})
+    for key in DEFAULT_SETTINGS["ai"]:
+        if key in payload:
+            cfg[key] = str(payload[key]).strip()
+    save_settings(data)
+    return {"ok": True, "ai": ai_config()}
 
 
 def parse_schedule(value: str) -> int | None:
