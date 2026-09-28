@@ -756,6 +756,40 @@ class XHS_Creator_Apis:
         )
         return success, msg, res_json
 
+    def delete_note(self, note_id, proxies=None):
+        """删除已发布的笔记。
+
+        接口来自创作者平台前端 bundle（index.<hash>.js）里的 API_LIST：
+            DELETE_NOTE: `${creator}/web_api/sns/capa/postgw/note/delete`
+        请求体只需要 note_id。用不存在的 id 实测返回
+        ``100601 根据笔记ID列表，查询笔记基本信息失败``，说明参数名正确；
+        传 note_ids / id 都会被 400 挡回「note_id: param is required」。
+        """
+        api = '/web_api/sns/capa/postgw/note/delete'
+        data = {'note_id': note_id}
+        headers, cookies, body = self._request_params(
+            api,
+            data,
+            'POST',
+            referer=f'{self.base_url}/',
+            target_origin=self.edith_url,
+            order_wire_headers=False,
+        )
+        response = self.http.post(
+            self.edith_url + api,
+            headers=headers,
+            data=body.encode('utf-8'),
+            cookies=cookies,
+            proxies=self._proxies(proxies),
+            timeout=REQUEST_TIMEOUT,
+        )
+        res_json = response.json()
+        success = bool(res_json.get('success'))
+        msg = res_json.get('msg') or res_json.get('message') or (
+            '删除成功' if success else '删除失败'
+        )
+        return success, msg, res_json
+
     def get_file_info(self, file, media_type="image"):
         file_size = len(file)
         if media_type == "image":

@@ -43,6 +43,9 @@
   th { color:var(--muted); font-weight:500; font-size:12px; }
   .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:14px; }
   .mat { border:1px solid var(--line); border-radius:10px; overflow:hidden; background:#fff; }
+  .mat { position:relative; }
+  .mat > .pickbox { position:absolute; top:8px; left:8px; z-index:2; width:18px; height:18px;
+    margin:0; cursor:pointer; box-shadow:0 0 0 2px rgba(255,255,255,.9); accent-color:var(--brand); }
   .mat img { width:100%; height:150px; object-fit:cover; display:block; background:#f1f3f5; }
   .mat .body { padding:10px 12px; }
   .mat h4 { margin:0 0 4px; font-size:13px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -84,6 +87,13 @@
     box-shadow:0 6px 20px rgba(0,0,0,.18); animation:pop .2s ease-out; }
   @keyframes pop { from { transform:translateY(8px); opacity:0 } to { transform:none; opacity:1 } }
   .tablewrap { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  .noteGrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:14px; }
+  .noteCard { border:1px solid var(--line); border-radius:10px; overflow:hidden; background:#fff; }
+  .noteCard img { width:100%; height:150px; object-fit:cover; display:block; background:#f1f3f5; }
+  .noteCard .body { padding:10px 12px; }
+  .noteCard h4 { margin:0 0 6px; font-size:13px; font-weight:600; line-height:1.4; }
+  .noteCard .stats { color:var(--muted); font-size:12px; display:flex; gap:10px; flex-wrap:wrap; }
+  .noteCard .foot { display:flex; justify-content:space-between; align-items:center; margin-top:10px; }
   #conflictBox { display:none; margin-top:14px; padding:14px 16px; border-radius:10px;
     border:1px solid #ffd2d8; background:#fff6f7; }
   #conflictBox b { color:var(--brand); }
@@ -150,6 +160,7 @@
   <button data-tab="accounts" class="on">账号</button>
   <button data-tab="library">素材库</button>
   <button data-tab="publish">发布笔记</button>
+  <button data-tab="notes">已发布</button>
   <button data-tab="dm">私信</button>
   <button data-tab="notify">通知</button>
 </nav>
@@ -238,34 +249,62 @@
       <details style="margin-top:14px">
         <summary class="muted" style="cursor:pointer">AI 接口配置（首次使用必须填）</summary>
         <div class="row" style="margin-top:12px">
-          <div class="field grow"><label>文案 Base URL</label>
-            <input id="aiTextBase" placeholder="https://api.deepseek.com/v1"></div>
-          <div class="field grow"><label>文案模型</label>
-            <input id="aiTextModel" placeholder="deepseek-chat"></div>
+          <div class="field grow"><label>文案来源</label>
+            <select id="aiTextProvider">
+              <option value="openai">OpenAI 兼容（DeepSeek / 智谱 / 硅基流动…）</option>
+              <option value="pollinations">Pollinations（免费，额度不稳定）</option>
+            </select>
+          </div>
+          <div class="field grow"><label>绘图来源</label>
+            <select id="aiImageProvider">
+              <option value="pollinations">Pollinations（免费、免密钥，推荐）</option>
+              <option value="openai">OpenAI 兼容（智谱 / 硅基流动…）</option>
+            </select>
+          </div>
         </div>
-        <div class="row" style="margin-top:12px">
-          <div class="field grow"><label>文案 API Key</label>
-            <input id="aiTextKey" type="password" placeholder="sk-..."></div>
+
+        <div id="aiTextOpenai">
+          <div class="row" style="margin-top:12px">
+            <div class="field grow"><label>文案 Base URL</label>
+              <input id="aiTextBase" placeholder="https://open.bigmodel.cn/api/paas/v4"></div>
+            <div class="field grow"><label>文案模型</label>
+              <input id="aiTextModel" placeholder="glm-4-flash"></div>
+          </div>
+          <div class="row" style="margin-top:12px">
+            <div class="field grow"><label>文案 API Key（智谱在 open.bigmodel.cn 免费申请）</label>
+              <input id="aiTextKey" type="password" placeholder="xxxxxxxx.xxxxxxxx"></div>
+          </div>
         </div>
-        <div class="row" style="margin-top:12px">
-          <div class="field grow"><label>绘图 Base URL</label>
-            <input id="aiImageBase" placeholder="https://open.bigmodel.cn/api/paas/v4"></div>
-          <div class="field grow"><label>绘图模型</label>
-            <input id="aiImageModel" placeholder="cogview-3-flash"></div>
+
+        <div id="aiImageOpenai">
+          <div class="row" style="margin-top:12px">
+            <div class="field grow"><label>绘图 Base URL</label>
+              <input id="aiImageBase" placeholder="https://open.bigmodel.cn/api/paas/v4"></div>
+            <div class="field grow"><label>绘图模型</label>
+              <input id="aiImageModel" placeholder="cogview-3-flash"></div>
+          </div>
+          <div class="row" style="margin-top:12px">
+            <div class="field grow"><label>绘图 API Key</label>
+              <input id="aiImageKey" type="password"></div>
+          </div>
         </div>
+
         <div class="row" style="margin-top:12px">
-          <div class="field grow"><label>绘图 API Key</label>
-            <input id="aiImageKey" type="password"></div>
-          <div class="field"><label>图片尺寸</label>
-            <input id="aiImageSize" placeholder="1024x1536" style="width:150px"></div>
+          <div class="field"><label>图片尺寸（宽x高）</label>
+            <input id="aiImageSize" placeholder="1024x1536" style="width:160px"></div>
         </div>
         <div class="row" style="margin-top:12px">
           <button id="btnAiSave">保存配置</button>
         </div>
         <p class="muted" style="margin:10px 0 0">
-          两边都走 OpenAI 兼容协议：<code>/chat/completions</code> 和
-          <code>/images/generations</code> 会接在 Base URL 后面。
-          配图留空则只生成文案。
+          <b>推荐配置</b>：文案用智谱 <code>glm-4-flash</code>（免费），
+          绘图用 <b>Pollinations</b>（免费、免密钥）。<br>
+          智谱 API Key 在 <code>open.bigmodel.cn</code> 免费申请，
+          格式形如 <code>xxxx.xxxx</code>。有了同一个 key 之后，
+          绘图也可以切成 OpenAI 兼容 + <code>cogview-3-flash</code>（同样免费）。<br>
+          <b>OpenAI 兼容</b>走 <code>/chat/completions</code> 与
+          <code>/images/generations</code>，接在 Base URL 后面。<br>
+          配图数量填 0 就只生成文案。
         </p>
         <div class="msg" id="aiCfgMsg"></div>
       </details>
@@ -298,7 +337,12 @@
     <div class="card">
       <div class="row" style="justify-content:space-between">
         <h3 style="margin:0;font-size:15px">素材列表（<b id="matCount">0</b>）</h3>
-        <button class="ghost" id="btnReloadMat">刷新</button>
+        <div class="row">
+          <span class="muted" id="matSelInfo" style="display:none">已选 <b id="matSelCount">0</b> 条</span>
+          <button id="btnMatDeleteSel" style="display:none">删除选中</button>
+          <button class="ghost" id="btnMatSelectAll">全选</button>
+          <button class="ghost" id="btnReloadMat">刷新</button>
+        </div>
       </div>
       <div class="grid" id="matGrid" style="margin-top:14px"></div>
       <p id="matEmpty" class="empty">素材库是空的，先在上面新建一条。</p>
@@ -361,6 +405,29 @@
         <tbody id="resultRows"></tbody>
       </table>
       </div>
+    </div>
+  </section>
+
+  <!-- ============ 已发布笔记 ============ -->
+  <section class="panel" id="panel-notes">
+    <div class="card">
+      <div class="row">
+        <div class="field grow" style="max-width:320px">
+          <label>选择账号</label>
+          <select id="noteAccount"><option value="">（请选择）</option></select>
+        </div>
+        <button id="btnLoadNotes" disabled>加载已发布笔记</button>
+        <span class="muted">共 <b id="noteCount">0</b> 条</span>
+      </div>
+      <p class="muted" style="margin:10px 0 0">
+        列出账号里<b>已经发布</b>的笔记，可以直接删除。
+        删除会同步到小红书、<b>不可撤销</b>，删之前请确认清楚。
+      </p>
+      <div class="msg" id="noteMsg"></div>
+    </div>
+    <div class="card">
+      <div class="noteGrid" id="noteGrid"></div>
+      <p id="noteEmpty" class="empty">选择账号后点「加载已发布笔记」</p>
     </div>
   </section>
 
@@ -450,7 +517,8 @@ const $ = (id) => document.getElementById(id);
 const state = {
   accounts: [], materials: [], pickedMaterials: new Set(),
   chatUser: "", dmAccount: "", editingMaterial: "",
-  monitor: {}, prevUnread: {}, monitorReady: false,
+  noteAccount: "",
+  monitor: {}, prevUnread: {}, monitorReady: false, matSelected: new Set(),
   conflict: null,
 };
 
@@ -578,6 +646,18 @@ async function loadAccounts() {
 
   if (!accounts.some((a) => a.name === state.dmAccount)) state.dmAccount = "";
   renderDmChips();
+
+  // 「已发布」页的账号选择
+  const na = $("noteAccount"); const keepNote = na.value;
+  na.innerHTML = '<option value="">（请选择）</option>';
+  accounts.forEach((a) => {
+    const o = document.createElement("option");
+    o.value = a.name; o.textContent = `${a.nickname||a.name} (${a.name})`;
+    na.appendChild(o);
+  });
+  na.value = accounts.some((a) => a.name === keepNote) ? keepNote : "";
+  state.noteAccount = na.value;
+  $("btnLoadNotes").disabled = !state.noteAccount;
 
   $("headInfo").textContent = accounts.length
     ? `已保存 ${accounts.length} 个账号` : "未保存任何账号";
@@ -735,9 +815,19 @@ function pollLogin() {
 }
 
 /* ---------------- 素材库 ---------------- */
+function syncAiProviderRows() {
+  // 选了 Pollinations 就不用填 base_url / key，把这些行藏起来少点干扰
+  $("aiTextOpenai").style.display = $("aiTextProvider").value === "openai" ? "" : "none";
+  $("aiImageOpenai").style.display = $("aiImageProvider").value === "openai" ? "" : "none";
+}
+$("aiTextProvider").onchange = syncAiProviderRows;
+$("aiImageProvider").onchange = syncAiProviderRows;
+
 async function loadAiConfig() {
   try {
     const { ai } = await api("/api/settings/ai");
+    $("aiTextProvider").value = ai.text_provider || "openai";
+    $("aiImageProvider").value = ai.image_provider || "pollinations";
     $("aiTextBase").value = ai.text_base_url || "";
     $("aiTextModel").value = ai.text_model || "";
     $("aiTextKey").value = ai.text_api_key || "";
@@ -745,6 +835,7 @@ async function loadAiConfig() {
     $("aiImageModel").value = ai.image_model || "";
     $("aiImageKey").value = ai.image_api_key || "";
     $("aiImageSize").value = ai.image_size || "";
+    syncAiProviderRows();
   } catch {}
 }
 
@@ -753,9 +844,11 @@ $("btnAiSave").onclick = async () => {
     await api("/api/settings/ai", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        text_provider: $("aiTextProvider").value,
         text_base_url: $("aiTextBase").value.trim(),
         text_model: $("aiTextModel").value.trim(),
         text_api_key: $("aiTextKey").value.trim(),
+        image_provider: $("aiImageProvider").value,
         image_base_url: $("aiImageBase").value.trim(),
         image_model: $("aiImageModel").value.trim(),
         image_api_key: $("aiImageKey").value.trim(),
@@ -795,9 +888,47 @@ $("btnAiGenerate").onclick = async () => {
   }
 };
 
+function updateMatSelBar() {
+  const n = state.matSelected.size;
+  $("matSelCount").textContent = n;
+  $("matSelInfo").style.display = n ? "" : "none";
+  $("btnMatDeleteSel").style.display = n ? "" : "none";
+  $("btnMatSelectAll").textContent =
+    n && n === state.materials.length ? "取消全选" : "全选";
+}
+
+$("btnMatSelectAll").onclick = () => {
+  if (state.materials.length && state.matSelected.size === state.materials.length) {
+    state.matSelected.clear();
+  } else {
+    state.materials.forEach((m) => state.matSelected.add(m.id));
+  }
+  loadMaterials();
+};
+
+$("btnMatDeleteSel").onclick = async () => {
+  const ids = [...state.matSelected];
+  if (!ids.length) return;
+  if (!confirm(`删除选中的 ${ids.length} 条素材？\n文件会移入 library/trash/，可以找回。`)) return;
+  try {
+    const r = await api("/api/library/delete", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids }),
+    });
+    state.matSelected.clear();
+    showMsg($("matMsg"), `已删除 ${r.removed} 条素材（文件在 library/trash/ 里可找回）`, true);
+    loadMaterials();
+  } catch (e) {
+    showMsg($("matMsg"), e.message, false);
+  }
+};
+
 async function loadMaterials() {
   const { materials } = await api("/api/library");
   state.materials = materials;
+  // 素材可能已被删掉，把选中集合里失效的 id 清掉
+  const alive = new Set(materials.map((m) => m.id));
+  state.matSelected = new Set([...state.matSelected].filter((id) => alive.has(id)));
   $("matCount").textContent = materials.length;
   $("matEmpty").style.display = materials.length ? "none" : "block";
 
@@ -808,12 +939,20 @@ async function loadMaterials() {
     const cover = m.media_type === "video"
       ? `<div style="height:150px;display:flex;align-items:center;justify-content:center;background:#f1f3f5" class="muted">视频素材</div>`
       : `<img src="/api/library/${m.id}/file/0" alt="">`;
-    div.innerHTML = `${cover}<div class="body"><h4>${m.title}</h4>
+    const checked = state.matSelected.has(m.id) ? "checked" : "";
+    div.innerHTML = `<input type="checkbox" class="pickbox" data-pick="${m.id}" ${checked}>${cover}<div class="body"><h4>${m.title}</h4>
       <p>${m.desc}</p>
       <div class="foot"><span class="muted">${fmtTime(m.created_at*1000)}</span>
       <span><button class="ghost" data-edit="${m.id}" style="padding:4px 10px">编辑</button>
       <button class="ghost" data-del="${m.id}" style="padding:4px 10px">删除</button></span></div></div>`;
     grid.appendChild(div);
+  });
+  grid.querySelectorAll("[data-pick]").forEach((box) => {
+    box.onchange = () => {
+      const id = box.dataset.pick;
+      if (box.checked) state.matSelected.add(id); else state.matSelected.delete(id);
+      updateMatSelBar();
+    };
   });
   grid.querySelectorAll("[data-edit]").forEach((b) => {
     b.onclick = () => startEditMaterial(b.dataset.edit);
@@ -825,6 +964,7 @@ async function loadMaterials() {
       loadMaterials();
     };
   });
+  updateMatSelBar();
   renderPickList();
 }
 
@@ -1031,6 +1171,83 @@ $("btnCancelPublish").onclick = async () => {
   try { await api(`/api/publish/job/${currentJobId}/cancel`, { method: "POST" }); } catch {}
   showMsg($("publishMsg"), "已请求停止，当前这条发完就会中断", true);
 };
+
+/* ---------------- 已发布笔记 ---------------- */
+$("noteAccount").onchange = (e) => {
+  state.noteAccount = e.target.value;
+  $("btnLoadNotes").disabled = !state.noteAccount;
+  $("noteGrid").innerHTML = "";
+  $("noteEmpty").style.display = "block";
+  $("noteEmpty").textContent = "点「加载已发布笔记」";
+  $("noteCount").textContent = "0";
+};
+
+async function loadNotes() {
+  const msg = $("noteMsg");
+  if (!state.noteAccount) return showMsg(msg, "先选择账号", false);
+  hideMsg(msg);
+  const grid = $("noteGrid");
+  grid.innerHTML = '<p class="empty">加载中...</p>';
+  try {
+    const r = await api(`/api/notes?name=${encodeURIComponent(state.noteAccount)}`);
+    const notes = r.notes || [];
+    $("noteCount").textContent = notes.length;
+    $("noteEmpty").style.display = notes.length ? "none" : "block";
+    if (!notes.length) {
+      grid.innerHTML = "";
+      $("noteEmpty").textContent = "该账号还没有已发布的笔记";
+      return;
+    }
+    grid.innerHTML = "";
+    notes.forEach((n) => {
+      const div = document.createElement("div");
+      div.className = "noteCard";
+      const cover = n.cover
+        ? `<img src="${n.cover}" alt="" loading="lazy">`
+        : `<div style="height:150px;display:flex;align-items:center;justify-content:center;background:#f1f3f5" class="muted">无封面</div>`;
+      div.innerHTML = `${cover}<div class="body">
+        <h4>${n.title}</h4>
+        <div class="stats"><span>❤ ${n.likes}</span><span>💬 ${n.comments}</span><span>👁 ${n.views}</span></div>
+        <div class="foot"><span class="muted">${fmtTime(n.time * 1000)}</span>
+        <button class="ghost" data-delnode="${n.id}" style="padding:4px 10px">删除</button></div>
+      </div>`;
+      grid.appendChild(div);
+    });
+    grid.querySelectorAll("[data-delnode]").forEach((b) => {
+      b.onclick = () => deleteNote(b.dataset.delnode, b);
+    });
+    if (r.message) showMsg(msg, "提示：" + r.message, false);
+  } catch (e) {
+    grid.innerHTML = '<p class="empty">加载失败</p>';
+    showMsg(msg, e.message, false);
+  }
+}
+
+async function deleteNote(noteId, btn) {
+  const msg = $("noteMsg");
+  // 破坏性操作：两次确认，第二次要手动输入 DELETE 才放行
+  if (!confirm("确定删除这条笔记吗？\n删除后会从你的小红书账号里消失，无法撤销。")) return;
+  const typed = prompt("再确认一次：输入 DELETE 才会真正删除");
+  if ((typed || "").trim().toUpperCase() !== "DELETE") {
+    return showMsg(msg, "已取消，没有删除任何东西", false);
+  }
+  btn.disabled = true;
+  btn.textContent = "删除中...";
+  try {
+    await api("/api/notes/delete", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: state.noteAccount, note_id: noteId }),
+    });
+    showMsg(msg, "已删除", true);
+    loadNotes();
+  } catch (e) {
+    showMsg(msg, e.message, false);
+    btn.disabled = false;
+    btn.textContent = "删除";
+  }
+}
+
+$("btnLoadNotes").onclick = loadNotes;
 
 /* ---------------- 私信 ---------------- */
 

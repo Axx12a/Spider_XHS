@@ -258,12 +258,19 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # AI 生成素材用。文案和绘图分开配置，可以混用不同服务商。
     # 都走 OpenAI 兼容接口，所以换服务商只需要改 base_url / model。
     "ai": {
-        "text_base_url": "https://api.deepseek.com/v1",
+        # openai = 任意 OpenAI 兼容服务（DeepSeek / 智谱 / 硅基流动 …）
+        # pollinations = Pollinations 免费额度，无需密钥但随时可能被限
+        "text_provider": "openai",
+        # 智谱 GLM-4-Flash 免费，是性价比最高的默认选择
+        "text_base_url": "https://open.bigmodel.cn/api/paas/v4",
         "text_api_key": "",
-        "text_model": "deepseek-chat",
-        "image_base_url": "",
+        "text_model": "glm-4-flash",
+        # pollinations 绘图免费且不需要密钥，所以默认选它
+        "image_provider": "pollinations",
+        # 如果已经有智谱 key，绘图也可以切到 openai 兼容 + cogview-3-flash（同样免费）
+        "image_base_url": "https://open.bigmodel.cn/api/paas/v4",
         "image_api_key": "",
-        "image_model": "",
+        "image_model": "cogview-3-flash",
         "image_size": "1024x1536",
     },
 }
@@ -436,10 +443,7 @@ def _parse_json_block(text: str) -> dict:
     raise RuntimeError("模型没有返回可解析的 JSON")
 
 
-def ai_write_note(topic: str, style: str, count: int, cfg: dict) -> dict:
-    if not (cfg.get("text_api_key") or "").strip():
-        raise RuntimeError("还没有配置文案模型的 API Key")
-
+def _build_note_messages(topic: str, style: str, count: int) -> list[dict]:
     system = (
         "你是资深小红书运营，擅长写高互动率的图文笔记。"
         "只输出 JSON，不要解释、不要代码块标记。"
@@ -459,27 +463,101 @@ def ai_write_note(topic: str, style: str, count: int, cfg: dict) -> dict:
         f"image_prompts 数量必须等于 {count}，每个描述具体画面、构图、色调，"
         "是给文生图模型用的英文提示词，画面里不要出现文字或水印。"
     )
-    data = _openai_post(
-        cfg["text_base_url"],
-        "/chat/completions",
-        cfg["text_api_key"],
-        {
-            "model": cfg["text_model"],
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "temperature": 0.9,
-        },
-    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
+def _pollinations_text(messages: list[dict], cfg: dict) -> str:
+    import requests
+
+    body = {
+        "model": (cfg.get("text_model") or "").strip() or "openai",
+        "messages": messages,
+        "private": True,
+    }
+    resp = requests.post("https://text.pollinations.ai/openai", json=body, timeout=120)
+    resp.raise_for_status()
     try:
-        content = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError(f"文案接口返回结构异常：{str(data)[:200]}") from exc
+        content = resp.json()["choices"][0]["message"]["content"]
+    except Exception as exc:
+        raise RuntimeError(f"Pollinations 返回异常：{resp.text[:200]}") from exc
+    # Pollinations 会把「额度用尽」也当成正常正文返回，必须拦下来，
+    # 否则这段英文提示会被当成笔记内容存进素材库。
+    low = (content or "").lower()
+    if "budget" in low or "pollinations.ai/edit-key" in low:
+        raise RuntimeError(
+            "Pollinations 的免费文本额度已用尽。建议改用其它 OpenAI 兼容服务"
+            "（例如 DeepSeek），或去 pollinations.ai 注册拿 token。"
+        )
+    return content or ""
+
+
+def ai_write_note(topic: str, style: str, count: int, cfg: dict) -> dict:
+    messages = _build_note_messages(topic, style, count)
+    provider = (cfg.get("text_provider") or "openai").lower()
+
+    if provider == "pollinations":
+        content = _pollinations_text(messages, cfg)
+    else:
+        if not (cfg.get("text_api_key") or "").strip():
+            raise RuntimeError("还没有配置文案模型的 API Key")
+        data = _openai_post(
+            cfg["text_base_url"],
+            "/chat/completions",
+            cfg["text_api_key"],
+            {
+                "model": cfg["text_model"],
+                "messages": messages,
+                "temperature": 0.9,
+            },
+        )
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError(f"文案接口返回结构异常：{str(data)[:200]}") from exc
     return _parse_json_block(content)
 
 
+def _image_size(cfg: dict) -> tuple[int, int]:
+    raw = (cfg.get("image_size") or "1024x1536").lower().replace(" ", "").replace("*", "x")
+    try:
+        width, height = (int(v) for v in raw.split("x", 1))
+        if width > 0 and height > 0:
+            return width, height
+    except Exception:
+        pass
+    return 1024, 1536
+
+
+def _pollinations_image(prompt: str, cfg: dict) -> bytes:
+    """Pollinations 免密钥文生图：直接把提示词拼进 URL。"""
+    import requests
+    from urllib.parse import quote
+
+    width, height = _image_size(cfg)
+    url = (
+        "https://image.pollinations.ai/prompt/"
+        + quote(prompt, safe="")
+        + f"?width={width}&height={height}&nologo=true&seed={random.randint(1, 10 ** 9)}"
+    )
+    # 这里刻意不传 model：image_model 是给 OpenAI 兼容通道用的（默认是智谱的
+    # cogview-3-flash），传给 Pollinations 会报模型不存在。Pollinations 目前
+    # 只有一个模型，不传就是用它自己的默认值。
+    resp = requests.get(url, timeout=180)
+    resp.raise_for_status()
+    ctype = (resp.headers.get("content-type") or "").lower()
+    if not ctype.startswith("image/"):
+        raise RuntimeError(f"Pollinations 没有返回图片：{resp.text[:200]}")
+    return resp.content
+
+
 def ai_make_image(prompt: str, cfg: dict) -> bytes:
+    provider = (cfg.get("image_provider") or "pollinations").lower()
+    if provider == "pollinations":
+        return _pollinations_image(prompt, cfg)
+
     import requests
 
     if not (cfg.get("image_api_key") or "").strip():
@@ -532,7 +610,12 @@ def api_ai_generate(payload: dict) -> Any:
     # 配图并发生成：逐张串行会等到天荒地老
     images: list[str] = []
     image_errors: list[str] = []
-    if count and prompts and (cfg.get("image_api_key") or "").strip():
+    # Pollinations 不需要密钥，所以「有没有 key」不能作为能不能画图的判断
+    image_ready = (
+        (cfg.get("image_provider") or "pollinations").lower() == "pollinations"
+        or bool((cfg.get("image_api_key") or "").strip())
+    )
+    if count and prompts and image_ready:
         from concurrent.futures import ThreadPoolExecutor
 
         LIBRARY_MEDIA.mkdir(parents=True, exist_ok=True)
@@ -1071,6 +1154,29 @@ def api_library_delete(material_id: str) -> Any:
     return {"ok": True}
 
 
+@app.post("/api/library/delete")
+def api_library_delete_many(payload: dict) -> Any:
+    """批量删除素材。文件同样先进回收站，误删可以捞回来。"""
+    ids = {str(i) for i in (payload.get("ids") or [])}
+    if not ids:
+        return err("没有选中任何素材")
+
+    items = load_library()
+    kept: list[dict] = []
+    removed = 0
+    for item in items:
+        if str(item.get("id")) in ids:
+            for path in (item.get("images") or []) + (
+                [item["video"]] if item.get("video") else []
+            ):
+                move_to_trash(path)
+            removed += 1
+            continue
+        kept.append(item)
+    save_library(kept)
+    return {"ok": True, "removed": removed}
+
+
 @app.get("/api/library/{material_id}/file/{index}")
 def api_library_file(material_id: str, index: int) -> Any:
     for item in load_library():
@@ -1314,6 +1420,87 @@ def api_publish_job_cancel(job_id: str) -> Any:
 # --------------------------------------------------------------------------- #
 # 私信
 # --------------------------------------------------------------------------- #
+
+
+# --------------------------------------------------------------------------- #
+# 已发布笔记（查看 / 删除）
+#
+# 删除接口不在上游仓库里，是从创作者平台的前端 bundle 里翻出来的：
+#   DELETE_NOTE = `${creator}/web_api/sns/capa/postgw/note/delete`
+# 请求体只需要 note_id（实测传 note_ids / id 都会被 400 挡回）。
+# --------------------------------------------------------------------------- #
+
+
+def _note_rows(payload: Any) -> list[dict]:
+    rows = (
+        payload
+        if isinstance(payload, list)
+        else ((payload or {}).get("data") or {}).get("notes") or []
+    )
+    out: list[dict] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        images = item.get("images_list") or []
+        cover = images[0].get("url") if images and isinstance(images[0], dict) else ""
+        out.append(
+            {
+                "id": str(item.get("id") or ""),
+                "title": item.get("display_title") or "(无标题)",
+                "cover": cover or "",
+                "likes": item.get("likes") or 0,
+                "comments": item.get("comments_count") or 0,
+                "views": item.get("view_count") or 0,
+                "time": item.get("time") or 0,
+                "sticky": bool(item.get("sticky")),
+                "permission": item.get("permission_msg") or "",
+            }
+        )
+    return out
+
+
+@app.get("/api/notes")
+def api_notes(name: str) -> Any:
+    try:
+        from apis.xhs_creator_apis import XHS_Creator_Apis
+
+        auth = build_auth(name)
+        try:
+            api = XHS_Creator_Apis(auth.creator).bootstrap()
+            success, message, notes = api.get_all_posted_notes()
+        finally:
+            auth.close()
+        return {
+            "ok": True,
+            "notes": _note_rows(notes),
+            "message": "" if success else str(message),
+        }
+    except Exception as exc:
+        traceback.print_exc()
+        return err(str(exc), 500)
+
+
+@app.post("/api/notes/delete")
+def api_note_delete(payload: dict) -> Any:
+    name = (payload.get("name") or "").strip()
+    note_id = (payload.get("note_id") or "").strip()
+    if not name or not note_id:
+        return err("缺少账号或笔记 ID")
+    try:
+        from apis.xhs_creator_apis import XHS_Creator_Apis
+
+        auth = build_auth(name)
+        try:
+            api = XHS_Creator_Apis(auth.creator).bootstrap()
+            success, message, _ = api.delete_note(note_id)
+        finally:
+            auth.close()
+        if not success:
+            return err(f"删除失败：{message}", 500)
+        return {"ok": True, "message": message}
+    except Exception as exc:
+        traceback.print_exc()
+        return err(str(exc), 500)
 
 
 @app.get("/api/dm/chats")
