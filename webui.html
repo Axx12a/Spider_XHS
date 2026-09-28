@@ -51,6 +51,12 @@
   .mat .videoCover { height:150px; display:flex; align-items:center; justify-content:center;
     background:#1f2329; color:#fff; font-size:13px; cursor:zoom-in; letter-spacing:1px; }
   /* 素材预览：点缩略图看大图 / 放视频 */
+  .mediaStrip { display:flex; gap:10px; flex-wrap:wrap; margin-top:8px; }
+  .mediaStrip .thumb { position:relative; width:118px; height:118px; border-radius:8px;
+    overflow:hidden; border:1px solid var(--line); background:#f1f3f5; cursor:zoom-in; }
+  .mediaStrip .thumb img { width:100%; height:100%; object-fit:cover; display:block; }
+  .mediaStrip .thumb .vbadge { position:absolute; inset:0; display:flex; align-items:center;
+    justify-content:center; background:#1f2329; color:#fff; font-size:12px; }
   #lightbox { display:none; position:fixed; inset:0; z-index:100; overflow:auto;
     background:rgba(0,0,0,.88); padding:52px 18px 24px; }
   #lightbox.on { display:block; }
@@ -369,6 +375,10 @@
       <div class="row" style="margin-top:12px">
         <div class="field grow"><label>图片（可多选）</label><input id="matImages" type="file" accept="image/*" multiple></div>
         <div class="field grow"><label>视频（与图片二选一）</label><input id="matVideo" type="file" accept="video/*"></div>
+      </div>
+      <div id="matCurrentMediaWrap" style="display:none;margin-top:14px">
+        <label class="muted">当前素材（点缩略图看大图 / 播放视频）</label>
+        <div class="mediaStrip" id="matCurrentMedia"></div>
       </div>
       <div class="row" style="margin-top:12px">
         <div class="field grow"><label>话题（逗号分隔，不带 #）</label><input id="matTopics" placeholder="美食,家常菜"></div>
@@ -948,6 +958,44 @@ $("btnAiGenerate").onclick = async () => {
   }
 };
 
+/* ---------------- 素材预览（大图 / 视频播放） ---------------- */
+function openLightbox(material, focusIndex) {
+  const files = [];
+  (material.images || []).forEach((_, i) => files.push({ kind: "image", index: i }));
+  if (material.video) files.push({ kind: "video", index: (material.images || []).length });
+  if (!files.length) return;
+
+  const inner = $("lbInner");
+  inner.innerHTML = files.map((f) => {
+    const src = `/api/library/${material.id}/file/${f.index}?t=${Date.now()}`;
+    return f.kind === "video"
+      ? `<video src="${src}" controls preload="metadata" data-idx="${f.index}"></video>`
+      : `<img src="${src}" alt="" data-idx="${f.index}">`;
+  }).join("")
+    + `<div id="lbText"><h3>${material.title || ""}</h3><p>${material.desc || ""}</p>`
+    + ((material.topics || []).length
+        ? `<div class="tags">${material.topics.map((t) => `<span class="tag">${t}</span>`).join(" ")}</div>`
+        : "")
+    + `</div>`;
+
+  $("lightbox").classList.add("on");
+  document.body.style.overflow = "hidden";
+  if (focusIndex !== undefined) {
+    const target = inner.querySelector(`[data-idx="${focusIndex}"]`);
+    if (target) target.scrollIntoView({ block: "start" });
+  }
+}
+
+function closeLightbox() {
+  $("lightbox").classList.remove("on");
+  $("lbInner").innerHTML = "";   // 清空以停止视频播放
+  document.body.style.overflow = "";
+}
+
+$("lbClose").onclick = closeLightbox;
+$("lightbox").onclick = (e) => { if (e.target.id === "lightbox") closeLightbox(); };
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeLightbox(); });
+
 function updateMatSelBar() {
   const n = state.matSelected.size;
   $("matSelCount").textContent = n;
@@ -1037,9 +1085,33 @@ function clearMatForm() {
   $("btnCancelEdit").style.display = "none";
   $("replaceMediaWrap").style.display = "none";
   $("matReplaceMedia").checked = false;
+  $("matCurrentMediaWrap").style.display = "none";
+  $("matCurrentMedia").innerHTML = "";
   $("matTitle").value = ""; $("matDesc").value = "";
   $("matTopics").value = ""; $("matLocation").value = "";
   $("matImages").value = ""; $("matVideo").value = "";
+}
+
+/* 编辑时把当前素材的图片/视频列出来，点缩略图可以直接看大图或播放 */
+function renderEditMedia(m) {
+  const wrap = $("matCurrentMediaWrap");
+  const strip = $("matCurrentMedia");
+  strip.innerHTML = "";
+  const files = [];
+  (m.images || []).forEach((_, i) => files.push({ kind: "image", index: i }));
+  if (m.video) files.push({ kind: "video", index: (m.images || []).length });
+  if (!files.length) { wrap.style.display = "none"; return; }
+
+  wrap.style.display = "";
+  files.forEach((f) => {
+    const div = document.createElement("div");
+    div.className = "thumb";
+    div.innerHTML = f.kind === "video"
+      ? `<div class="vbadge">▶ 视频</div>`
+      : `<img src="/api/library/${m.id}/file/${f.index}" alt="" loading="lazy">`;
+    div.onclick = () => openLightbox(m, f.index);
+    strip.appendChild(div);
+  });
 }
 
 function startEditMaterial(id) {
@@ -1056,6 +1128,7 @@ function startEditMaterial(id) {
   $("matTopics").value = (m.topics || []).join(",");
   $("matLocation").value = m.location || "";
   $("matImages").value = ""; $("matVideo").value = "";
+  renderEditMedia(m);
   $("matTitle").scrollIntoView({ behavior: "smooth", block: "center" });
   hideMsg($("matMsg"));
 }
