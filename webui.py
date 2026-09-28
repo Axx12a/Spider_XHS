@@ -1483,21 +1483,41 @@ def api_notes(name: str) -> Any:
 @app.post("/api/notes/delete")
 def api_note_delete(payload: dict) -> Any:
     name = (payload.get("name") or "").strip()
-    note_id = (payload.get("note_id") or "").strip()
-    if not name or not note_id:
+    raw = payload.get("note_ids")
+    if raw is None:
+        single = (payload.get("note_id") or "").strip()
+        raw = [single] if single else []
+    note_ids = [str(i).strip() for i in raw if str(i).strip()]
+    if not name or not note_ids:
         return err("缺少账号或笔记 ID")
     try:
         from apis.xhs_creator_apis import XHS_Creator_Apis
 
-        auth = build_auth(name)
+        auth = build_auth(name)   # 复用同一个会话，避免每条都重新登录一次
         try:
             api = XHS_Creator_Apis(auth.creator).bootstrap()
-            success, message, _ = api.delete_note(note_id)
+            results: list[dict] = []
+            for index, note_id in enumerate(note_ids):
+                try:
+                    success, message, _ = api.delete_note(note_id)
+                    results.append(
+                        {"note_id": note_id, "ok": bool(success), "message": str(message)}
+                    )
+                except Exception as exc:
+                    results.append(
+                        {"note_id": note_id, "ok": False, "message": str(exc)}
+                    )
+                if index < len(note_ids) - 1:
+                    time.sleep(random.uniform(1.5, 3.0))   # 别连着猛点删除
         finally:
             auth.close()
-        if not success:
-            return err(f"删除失败：{message}", 500)
-        return {"ok": True, "message": message}
+        succeeded = sum(1 for r in results if r["ok"])
+        return {
+            "ok": True,
+            "results": results,
+            "succeeded": succeeded,
+            "total": len(results),
+        }
     except Exception as exc:
         traceback.print_exc()
         return err(str(exc), 500)

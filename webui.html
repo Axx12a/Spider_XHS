@@ -88,7 +88,9 @@
   @keyframes pop { from { transform:translateY(8px); opacity:0 } to { transform:none; opacity:1 } }
   .tablewrap { overflow-x:auto; -webkit-overflow-scrolling:touch; }
   .noteGrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:14px; }
-  .noteCard { border:1px solid var(--line); border-radius:10px; overflow:hidden; background:#fff; }
+  .noteCard { border:1px solid var(--line); border-radius:10px; overflow:hidden; background:#fff; position:relative; }
+  .noteCard .pickbox { position:absolute; top:8px; left:8px; z-index:2; width:18px; height:18px;
+    margin:0; cursor:pointer; box-shadow:0 0 0 2px rgba(255,255,255,.9); accent-color:var(--brand); }
   .noteCard img { width:100%; height:150px; object-fit:cover; display:block; background:#f1f3f5; }
   .noteCard .body { padding:10px 12px; }
   .noteCard h4 { margin:0 0 6px; font-size:13px; font-weight:600; line-height:1.4; }
@@ -417,7 +419,6 @@
           <select id="noteAccount"><option value="">（请选择）</option></select>
         </div>
         <button id="btnLoadNotes" disabled>加载已发布笔记</button>
-        <span class="muted">共 <b id="noteCount">0</b> 条</span>
       </div>
       <p class="muted" style="margin:10px 0 0">
         列出账号里<b>已经发布</b>的笔记，可以直接删除。
@@ -426,6 +427,14 @@
       <div class="msg" id="noteMsg"></div>
     </div>
     <div class="card">
+      <div class="row" style="justify-content:space-between;margin-bottom:12px">
+        <h3 style="margin:0;font-size:15px">笔记列表（<b id="noteCount">0</b>）</h3>
+        <div class="row">
+          <span class="muted" id="noteSelInfo" style="display:none">已选 <b id="noteSelCount">0</b> 条</span>
+          <button id="btnNoteDeleteSel" style="display:none">删除选中</button>
+          <button class="ghost" id="btnNoteSelectAll">全选</button>
+        </div>
+      </div>
       <div class="noteGrid" id="noteGrid"></div>
       <p id="noteEmpty" class="empty">选择账号后点「加载已发布笔记」</p>
     </div>
@@ -518,6 +527,7 @@ const state = {
   accounts: [], materials: [], pickedMaterials: new Set(),
   chatUser: "", dmAccount: "", editingMaterial: "",
   noteAccount: "",
+  noteSelected: new Set(), noteTotal: 0,
   monitor: {}, prevUnread: {}, monitorReady: false, matSelected: new Set(),
   conflict: null,
 };
@@ -1175,12 +1185,23 @@ $("btnCancelPublish").onclick = async () => {
 /* ---------------- 已发布笔记 ---------------- */
 $("noteAccount").onchange = (e) => {
   state.noteAccount = e.target.value;
+  state.noteSelected = new Set();
   $("btnLoadNotes").disabled = !state.noteAccount;
   $("noteGrid").innerHTML = "";
   $("noteEmpty").style.display = "block";
   $("noteEmpty").textContent = "点「加载已发布笔记」";
   $("noteCount").textContent = "0";
+  updateNoteSelBar();
 };
+
+function updateNoteSelBar() {
+  const n = state.noteSelected.size;
+  $("noteSelCount").textContent = n;
+  $("noteSelInfo").style.display = n ? "" : "none";
+  $("btnNoteDeleteSel").style.display = n ? "" : "none";
+  $("btnNoteSelectAll").textContent =
+    n && n === state.noteTotal ? "取消全选" : "全选";
+}
 
 async function loadNotes() {
   const msg = $("noteMsg");
@@ -1191,6 +1212,8 @@ async function loadNotes() {
   try {
     const r = await api(`/api/notes?name=${encodeURIComponent(state.noteAccount)}`);
     const notes = r.notes || [];
+    state.noteTotal = notes.length;
+    state.noteSelected = new Set();
     $("noteCount").textContent = notes.length;
     $("noteEmpty").style.display = notes.length ? "none" : "block";
     if (!notes.length) {
@@ -1205,7 +1228,7 @@ async function loadNotes() {
       const cover = n.cover
         ? `<img src="${n.cover}" alt="" loading="lazy">`
         : `<div style="height:150px;display:flex;align-items:center;justify-content:center;background:#f1f3f5" class="muted">无封面</div>`;
-      div.innerHTML = `${cover}<div class="body">
+      div.innerHTML = `<input type="checkbox" class="pickbox" data-notepick="${n.id}">${cover}<div class="body">
         <h4>${n.title}</h4>
         <div class="stats"><span>❤ ${n.likes}</span><span>💬 ${n.comments}</span><span>👁 ${n.views}</span></div>
         <div class="foot"><span class="muted">${fmtTime(n.time * 1000)}</span>
@@ -1213,9 +1236,17 @@ async function loadNotes() {
       </div>`;
       grid.appendChild(div);
     });
-    grid.querySelectorAll("[data-delnode]").forEach((b) => {
-      b.onclick = () => deleteNote(b.dataset.delnode, b);
+    grid.querySelectorAll("[data-notepick]").forEach((box) => {
+      box.onchange = () => {
+        const id = box.dataset.notepick;
+        if (box.checked) state.noteSelected.add(id); else state.noteSelected.delete(id);
+        updateNoteSelBar();
+      };
     });
+    grid.querySelectorAll("[data-delnode]").forEach((b) => {
+      b.onclick = () => deleteNotes([b.dataset.delnode]);
+    });
+    updateNoteSelBar();
     if (r.message) showMsg(msg, "提示：" + r.message, false);
   } catch (e) {
     grid.innerHTML = '<p class="empty">加载失败</p>';
@@ -1223,29 +1254,47 @@ async function loadNotes() {
   }
 }
 
-async function deleteNote(noteId, btn) {
+async function deleteNotes(ids) {
   const msg = $("noteMsg");
-  // 破坏性操作：两次确认，第二次要手动输入 DELETE 才放行
-  if (!confirm("确定删除这条笔记吗？\n删除后会从你的小红书账号里消失，无法撤销。")) return;
-  const typed = prompt("再确认一次：输入 DELETE 才会真正删除");
-  if ((typed || "").trim().toUpperCase() !== "DELETE") {
-    return showMsg(msg, "已取消，没有删除任何东西", false);
-  }
+  if (!ids.length) return;
+  const label = ids.length === 1 ? "这条笔记" : `选中的 ${ids.length} 条笔记`;
+  if (!confirm(`确定删除${label}吗？\n删除后会从你的小红书账号里消失，无法撤销。`)) return;
+
+  const btn = $("btnNoteDeleteSel");
   btn.disabled = true;
   btn.textContent = "删除中...";
+  showMsg(msg, `正在删除 ${ids.length} 条，请勿操作...`, true);
   try {
-    await api("/api/notes/delete", {
+    const r = await api("/api/notes/delete", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: state.noteAccount, note_id: noteId }),
+      body: JSON.stringify({ name: state.noteAccount, note_ids: ids }),
     });
-    showMsg(msg, "已删除", true);
-    loadNotes();
+    const failed = (r.results || []).filter((x) => !x.ok);
+    let text = `完成：成功 ${r.succeeded} / 共 ${r.total}`;
+    if (failed.length) text += `　⚠️ ${failed.length} 条失败：${failed[0].message}`;
+    showMsg(msg, text, !failed.length);
+    state.noteSelected = new Set();
+    await loadNotes();
   } catch (e) {
     showMsg(msg, e.message, false);
+  } finally {
     btn.disabled = false;
-    btn.textContent = "删除";
+    btn.textContent = "删除选中";
   }
 }
+
+$("btnNoteSelectAll").onclick = () => {
+  const all = document.querySelectorAll("[data-notepick]");
+  const uncheckAll = state.noteTotal && state.noteSelected.size === state.noteTotal;
+  state.noteSelected = new Set();
+  all.forEach((b) => {
+    b.checked = !uncheckAll;
+    if (!uncheckAll) state.noteSelected.add(b.dataset.notepick);
+  });
+  updateNoteSelBar();
+};
+
+$("btnNoteDeleteSel").onclick = () => deleteNotes([...state.noteSelected]);
 
 $("btnLoadNotes").onclick = loadNotes;
 
