@@ -231,20 +231,49 @@
           <input id="aiTopic" placeholder="例如：秋冬平价保湿面霜推荐"></div>
       </div>
       <div class="row" style="margin-top:12px">
-        <div class="field grow"><label>风格</label>
-          <input id="aiStyle" list="aiStyleList" placeholder="种草分享">
+        <div class="field grow"><label>风格（可下拉选，也可直接输入）</label>
+          <input id="aiStyle" list="aiStyleList" placeholder="例如：接单广告">
           <datalist id="aiStyleList">
-            <option value="种草分享"></option>
-            <option value="干货教程"></option>
-            <option value="生活记录"></option>
-            <option value="情绪共鸣"></option>
-            <option value="测评对比"></option>
-            <option value="避坑指南"></option>
+            <optgroup label="接单 / 带货">
+              <option value="接单广告"></option>
+              <option value="促销带货"></option>
+              <option value="限时优惠"></option>
+              <option value="价格对比"></option>
+              <option value="学生党省钱"></option>
+              <option value="个人接单介绍"></option>
+            </optgroup>
+            <optgroup label="作品 / 信任">
+              <option value="作品展示"></option>
+              <option value="客户案例"></option>
+              <option value="口碑见证"></option>
+              <option value="服务介绍"></option>
+              <option value="过程记录"></option>
+            </optgroup>
+            <optgroup label="知识 / 人设">
+              <option value="干货教程"></option>
+              <option value="经验分享"></option>
+              <option value="行业揭秘"></option>
+              <option value="清单合集"></option>
+              <option value="答疑解惑"></option>
+              <option value="个人IP故事"></option>
+            </optgroup>
+            <optgroup label="通用">
+              <option value="种草分享"></option>
+              <option value="生活记录"></option>
+              <option value="情绪共鸣"></option>
+              <option value="测评对比"></option>
+              <option value="避坑指南"></option>
+            </optgroup>
           </datalist>
         </div>
         <div class="field"><label>配图数量</label>
           <input id="aiImageCount" type="number" min="0" max="6" value="2" style="width:110px"></div>
         <button id="btnAiGenerate">生成素材</button>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <div class="field grow"><label>补充要求（可选，会直接写进提示词，优先级最高）</label>
+          <textarea id="aiExtra" rows="2" placeholder="例如：突出价格便宜、面向学生党、强调没有中间商、结尾引导私信报价"></textarea>
+        </div>
       </div>
       <div class="msg" id="aiMsg"></div>
 
@@ -875,7 +904,12 @@ $("btnAiGenerate").onclick = async () => {
   try {
     const r = await api("/api/ai/generate", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ topic, style: $("aiStyle").value.trim(), image_count: count }),
+      body: JSON.stringify({
+        topic,
+        style: $("aiStyle").value.trim(),
+        extra: $("aiExtra").value.trim(),
+        image_count: count,
+      }),
     });
     const n = (r.material.images || []).length;
     let text = `已生成《${r.material.title}》`;

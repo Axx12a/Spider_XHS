@@ -418,6 +418,22 @@ def _openai_post(base_url: str, path: str, key: str, payload: dict, timeout: flo
         json=payload,
         timeout=timeout,
     )
+    # 这两个错误最常见的根因是「Key 和 Base URL 不是同一家的」，
+    # 原始返回是服务商自己的黑话，直接抛出去用户看不懂，这里补上人话。
+    if resp.status_code == 401:
+        raise RuntimeError(
+            f"认证失败（401）。当前请求发往 {base_url}，"
+            "请确认这个 API Key 是在该平台申请的 —— "
+            "把智谱的 Key 填到 DeepSeek 的地址上就会报这个。"
+            f"　原始返回：{resp.text[:200]}"
+        )
+    if resp.status_code == 404:
+        raise RuntimeError(
+            f"接口不存在（404）：{url}　请检查 Base URL。"
+            "智谱是 https://open.bigmodel.cn/api/paas/v4 ，"
+            "DeepSeek 是 https://api.deepseek.com/v1 。"
+            f"　原始返回：{resp.text[:200]}"
+        )
     if resp.status_code >= 400:
         raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
     return resp.json()
@@ -443,7 +459,7 @@ def _parse_json_block(text: str) -> dict:
     raise RuntimeError("模型没有返回可解析的 JSON")
 
 
-def _build_note_messages(topic: str, style: str, count: int) -> list[dict]:
+def _build_note_messages(topic: str, style: str, count: int, extra: str = "") -> list[dict]:
     system = (
         "你是资深小红书运营，擅长写高互动率的图文笔记。"
         "只输出 JSON，不要解释、不要代码块标记。"
@@ -463,6 +479,8 @@ def _build_note_messages(topic: str, style: str, count: int) -> list[dict]:
         f"image_prompts 数量必须等于 {count}，每个描述具体画面、构图、色调，"
         "是给文生图模型用的英文提示词，画面里不要出现文字或水印。"
     )
+    if extra.strip():
+        user += f"\n\n补充要求（必须遵守，优先级高于上面的默认风格）：\n{extra.strip()}"
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
@@ -494,8 +512,8 @@ def _pollinations_text(messages: list[dict], cfg: dict) -> str:
     return content or ""
 
 
-def ai_write_note(topic: str, style: str, count: int, cfg: dict) -> dict:
-    messages = _build_note_messages(topic, style, count)
+def ai_write_note(topic: str, style: str, count: int, cfg: dict, extra: str = "") -> dict:
+    messages = _build_note_messages(topic, style, count, extra)
     provider = (cfg.get("text_provider") or "openai").lower()
 
     if provider == "pollinations":
@@ -591,6 +609,7 @@ def api_ai_generate(payload: dict) -> Any:
     if not topic:
         return err("请先填写主题")
     style = (payload.get("style") or "").strip()
+    extra = (payload.get("extra") or "").strip()
     try:
         count = max(0, min(6, int(payload.get("image_count", 2))))
     except (TypeError, ValueError):
@@ -598,7 +617,7 @@ def api_ai_generate(payload: dict) -> Any:
 
     cfg = ai_config()
     try:
-        note = ai_write_note(topic, style, count, cfg)
+        note = ai_write_note(topic, style, count, cfg, extra)
     except Exception as exc:
         return err(f"文案生成失败：{exc}")
 

@@ -59,3 +59,8 @@ creator_cookie.json
 /settings.json
 /library/
 /uploads/
+
+# 开发时临时写的验证脚本，别提交
+_test_*.py
+_probe_*.py
+_check_*.py
