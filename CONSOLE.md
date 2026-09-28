@@ -1,106 +1,110 @@
-# Spider_XHS 本地网页控制台
+# 控制台详细说明
 
-给 [cv-cat/Spider_XHS](https://github.com/cv-cat/Spider_XHS) 补的一套本地网页界面。
-原仓库是**底层 API 库**（没有前端、没有服务、没有数据库），这个目录里的文件把它变成了可以直接使用的工具。
+安装与启动见 [README.md](./README.md)，这里是命令行参考、数据存放位置与实现说明。
 
-> 本控制台只是上层封装，所有小红书接口能力都来自上游 `Spider_XHS`，版权与使用条款以上游仓库为准。
-
-## 功能
-
-| 页面 | 能力 |
-|---|---|
-| 账号 | 扫码登录、多账号登录态管理（Cookie 隔离）、删除账号 |
-| 素材库 | 新建 / 编辑 / 删除素材，图文与视频，支持替换图片 |
-| 发布笔记 | 多账号 × 多笔记批量发布、话题、地点、定时、可见范围 |
-| 私信 | 多账号会话列表、聊天记录、回复、打开即已读、全部标为已读 |
-| 通知 | 钉钉机器人推送（页面关掉也能收到） |
-
-## 新增的文件
-
-| 文件 | 说明 |
-|---|---|
-| `webui.py` | 网页控制台后端（FastAPI） |
-| `webui.html` | 前端页面（单文件，无构建步骤） |
-| `xhs_cli.py` | 命令行版本，适合批量 / 定时任务 |
-| `启动控制台.bat` | Windows 启动脚本 |
-| `app.ico` | 快捷方式图标 |
-| `docker-compose.yml` | 可选的容器部署 |
-
-## 对上游的修复
-
-这两个是上游仓库本身的问题，不修就跑不起来：
-
-| 文件 | 问题 |
-|---|---|
-| `requirements.txt` | `curl_cffi` 锁在 `0.15.0`，但代码用的是 `chrome150` 指纹（见 `xhs_utils/xhs_creator/http.py` 注释），0.15.0 只支持到 `chrome146`，创作者端会直接抛 `ImpersonateError`。已改为 `0.16.3`。 |
-| `Dockerfile` | 完全没执行 `npm install`，而签名算法 `require('crypto-js')`，构建出的镜像一用就报 `Cannot find module 'crypto-js'`。已补上，并移除了无意义的 `EXPOSE 5000`。 |
-
-## 安装
-
-需要 **Python 3.10+** 和 **Node.js 20+**（签名算法是 JS）。
-
-```bash
-pip install -r requirements.txt
-npm ci
-```
-
-`npm ci` 只装一个包（crypto-js），但缺了发布功能就跑不了。
-
-## 启动
-
-```bash
-python webui.py
-```
-
-Windows 下直接双击 `启动控制台.bat`。启动后会打印可访问地址：
-
-```
-Spider_XHS 控制台已启动
-  本机访问        ：http://127.0.0.1:8848
-  手机 / 其它设备 ：http://<Tailscale IP>:8848
-  （未监听 0.0.0.0，同一局域网内的其它设备无法访问）
-```
-
-## 跨设备访问
-
-控制台**只监听 `127.0.0.1` 和本机的 Tailscale 地址**，不监听 `0.0.0.0`。所以同一局域网和公网都连不上，只有本机和已加入你 tailnet 的设备能访问——这是 socket 层面的限制，不依赖防火墙配置。
-
-Tailscale 地址在启动时自动检测（先问 `tailscale ip -4`，问不到就从 `ipconfig` 里按 CGNAT 网段 `100.64.0.0/10` 找），换机器或 IP 变化都不需要改代码。
-
-> **警告**：这个控制台没有任何登录认证，而它持有小红书账号的 Cookie，可以代表你发笔记、发私信。请只绑定回环地址和 Tailscale 地址，**不要改成 `0.0.0.0`**，否则同一局域网内的任何人都能控制你的账号。
+---
 
 ## 命令行版本
 
+不想开网页时用 `xhs_cli.py`，适合批量与定时任务。登录态与网页版共用同一个 `accounts/` 目录。
+
 ```bash
-python xhs_cli.py login main
-python xhs_cli.py accounts
+python xhs_cli.py login main                          # 扫码登录并保存登录态
+python xhs_cli.py accounts                            # 列出已保存账号
+
 python xhs_cli.py publish main -t "标题" -d "正文" -i 1.jpg 2.jpg
-python xhs_cli.py dm-list main
-python xhs_cli.py dm-read main <user_id>
-python xhs_cli.py dm-send main <user_id> "在的"
+python xhs_cli.py publish main -t "标题" -d "正文" -v clip.mp4 --at "2026-09-30 18:00"
+
+python xhs_cli.py dm-list main                        # 私信会话列表
+python xhs_cli.py dm-read main <user_id>              # 某个会话的消息记录
+python xhs_cli.py dm-send main <user_id> "在的"        # 回复私信
+python xhs_cli.py dm-watch main                       # 实时监听新私信
 ```
+
+需要代理时给任意命令加 `--proxy http://127.0.0.1:7890`。
+
+---
 
 ## 数据存放
 
-以下内容都保存在本地，且已加入 `.gitignore`，不会提交：
+全部保存在本地，且已加入 `.gitignore`，不会提交：
 
-```
-accounts/        多账号登录态（含 Cookie，敏感）
-settings.json    钉钉 Webhook 与加签密钥（敏感）
-library/         素材库（index.json + media/）
-uploads/         发布时的临时上传
-datas/           采集结果与导出
-```
+| 路径 | 内容 |
+|---|---|
+| `accounts/` | 多账号登录态（**含 Cookie，敏感**） |
+| `settings.json` | 钉钉 Webhook 与加签密钥（**敏感**） |
+| `library/` | 素材库（`index.json` + `media/`） |
+| `library/trash/` | 被删除或被替换掉的素材文件，**误删可以捞回来** |
+| `uploads/` | 发布时的临时上传 |
+| `datas/` | 采集结果与导出 |
 
-素材的删除和替换会先把文件移入 `library/trash/`，误删可以捞回来。
+---
 
-## 已知限制
+## 实现说明
 
-- 私信发送**只支持文本**（上游限制，不支持图片和礼物）。
-- 群聊的已读回执未实现，目前只处理单聊。
-- 已读接口的字段上游没有文档，是实测反推出来的：`chat_id` 是对方的 user_id 裸值，`read_store_id` 取会话的 `max_store_id`。如果上游改了协议，这里需要跟着调。
-- 上游仓库没有 LICENSE 文件（虽然 README 挂着 MIT 徽章），使用时请自行评估授权风险。
+### 监听地址
 
-## 风险提示
+`webui.py` 启动时创建两个监听 socket：`127.0.0.1` 和本机 Tailscale 地址，
+**不绑定 `0.0.0.0`**。Tailscale 地址的探测顺序是：
 
-所有操作都走逆向接口，存在**限流、风控、封号**风险。建议先用小号低频验证。
+1. `tailscale ip -4`（官方 CLI）
+2. `ipconfig` 输出中匹配 CGNAT 网段 `100.64.0.0/10`
+
+两者都失败时只监听回环，并在终端明确提示「当前只有本机可访问」，不会静默降级。
+
+### 消息监控
+
+后台线程按固定间隔（默认 10 秒，可在界面上调）遍历所有账号，各抓一次未读数和会话列表。
+新消息的判定条件是两个：
+
+1. 未读数增加
+2. **或** 最后消息时间前进
+
+只看未读会漏掉「消息到了但你已经在 App 里读过」的情况；而只看时间又会把
+**你自己发出去的消息**误判成新私信。所以条件 2 触发时，会回头查一次该会话
+最后一条消息的发送者 ID，是自己发的就跳过。
+
+前端通过 SSE（`/api/monitor/events`）接收推送。用长连接而不是前端定时器，
+是因为浏览器会把后台标签页的 `setInterval` 限流到分钟级。
+
+### 已读回执
+
+上游的 `mark_messages_read` 要求 `chat_id`、`read_store_id`、`unread_count`、
+`type`、`need_rm_offline` 五个字段，但**文档里没有说明 `chat_id` 是什么**，
+`get_chats` 接口也不返回这些字段。
+
+实测反推的结论（三种写法服务端都返回 `code: 0 success: true`，但只有第三种真正生效）：
+
+| `chat_id` 写法 | 结果 |
+|---|---|
+| `对方ID.我的ID` | 返回成功，未读不变 |
+| `我的ID.对方ID` | 返回成功，未读不变 |
+| **`对方ID`（裸值）** | 未读正确清零 |
+
+`read_store_id` 取会话列表里的 `max_store_id`。
+
+### 钉钉推送
+
+支持加签（HMAC-SHA256）与自定义关键词两种安全模式，见 「通知」页面。
+推送在独立线程执行，不阻塞监控轮询；同时做了**每分钟 15 条**的限流
+（钉钉官方上限是 20），超出会跳过并在终端打日志。
+
+---
+
+## 常见问题
+
+**发布报 `ImpersonateError: Impersonating chrome150 is not supported`**
+`curl_cffi` 版本过低。`pip install -U "curl_cffi>=0.16.2"`。
+
+**发布或签名报 `Cannot find module 'crypto-js'`**
+没有装 Node 依赖。在项目根目录执行 `npm ci`。
+
+**手机打不开**
+确认手机已连接 Tailscale，且访问的是启动时打印的那个 `100.x.x.x` 地址。
+
+**提示音不响**
+浏览器要求先有用户交互才允许播放声音。在页面上随便点一下即可解锁；
+Chrome 还需在站点设置里把「声音」设为允许。
+
+**红点一直不消失**
+打开会话会自动标记已读。若仍未消失，点右上角「全部标为已读」。
