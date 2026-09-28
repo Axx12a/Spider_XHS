@@ -244,10 +244,10 @@
   <!-- ============ 素材库 ============ -->
   <section class="panel" id="panel-library">
     <div class="card">
-      <h3 style="margin:0 0 6px;font-size:15px">AI 生成素材</h3>
+      <h3 style="margin:0 0 6px;font-size:15px">第一步：AI 写文案</h3>
       <p class="muted" style="margin:0 0 14px">
-        给一个主题，自动生成标题、正文、话题和配图，直接存进素材库。
-        用的是你自己配置的模型接口，不经过任何第三方中转。
+        只生成标题、正文和话题，<b>直接填到下面的「新建素材」表单</b>，
+        配图你自己选 —— AI 出的图质量不稳定，自己配图通常是更好的选择。
       </p>
       <div class="row">
         <div class="field grow"><label>主题（必填）</label>
@@ -289,15 +289,16 @@
             </optgroup>
           </datalist>
         </div>
-        <div class="field"><label>配图数量</label>
-          <input id="aiImageCount" type="number" min="0" max="6" value="2" style="width:110px"></div>
-        <button id="btnAiGenerate">生成素材</button>
+        <button id="btnAiText">生成文案</button>
       </div>
       <div class="row" style="margin-top:12px">
         <div class="field grow"><label>补充要求（可选，会直接写进提示词，优先级最高）</label>
           <textarea id="aiExtra" rows="2" placeholder="例如：突出价格便宜、面向学生党、强调没有中间商、结尾引导私信报价"></textarea>
         </div>
       </div>
+      <p class="muted" style="margin:10px 0 0">
+        点「生成文案」后会填进下面的表单，你选好自己的图片再点「保存到素材库」。
+      </p>
       <div class="msg" id="aiMsg"></div>
 
       <details style="margin-top:14px">
@@ -358,10 +359,32 @@
           绘图也可以切成 OpenAI 兼容 + <code>cogview-3-flash</code>（同样免费）。<br>
           <b>OpenAI 兼容</b>走 <code>/chat/completions</code> 与
           <code>/images/generations</code>，接在 Base URL 后面。<br>
-          配图数量填 0 就只生成文案。
         </p>
         <div class="msg" id="aiCfgMsg"></div>
       </details>
+    </div>
+
+    <div class="card">
+      <h3 style="margin:0 0 6px;font-size:15px">可选：AI 生成配图</h3>
+      <p class="muted" style="margin:0 0 14px">
+        免费额度的出图质量一般，建议只在自己没有素材时应急用。
+        可以追加到已有素材上，也可以新建一条。
+      </p>
+      <div class="row">
+        <div class="field grow"><label>画面描述（写清主体、场景、色调）</label>
+          <input id="aiImgPrompt" placeholder="例如：a student desk with CAD drawings on a laptop screen, warm light"></div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <div class="field grow" style="max-width:340px"><label>加到哪条素材</label>
+          <select id="aiImgTarget"><option value="">新建一条素材</option></select></div>
+        <div class="field"><label>数量</label>
+          <input id="aiImgCount" type="number" min="1" max="6" value="1" style="width:100px"></div>
+        <button id="btnAiImage">生成配图</button>
+      </div>
+      <p class="muted" style="margin:10px 0 0">
+        多张时会先让文案模型把描述扩成「同一主体的不同视角」，保证几张图风格一致。
+      </p>
+      <div class="msg" id="aiImgMsg"></div>
     </div>
 
     <div class="card">
@@ -924,37 +947,59 @@ $("btnAiSave").onclick = async () => {
   } catch (e) { showMsg($("aiCfgMsg"), e.message, false); }
 };
 
-$("btnAiGenerate").onclick = async () => {
+/* 只生成文案，填进下面的「新建素材」表单 —— 配图由用户自己选 */
+$("btnAiText").onclick = async () => {
   const msg = $("aiMsg");
   const topic = $("aiTopic").value.trim();
   if (!topic) return showMsg(msg, "先填一个主题", false);
-  const count = Math.max(0, Number($("aiImageCount").value) || 0);
-  $("btnAiGenerate").disabled = true;
-  showMsg(msg, count
-    ? "正在生成文案和配图，配图通常要几十秒，请稍等..."
-    : "正在生成文案...", true);
+  const btn = $("btnAiText");
+  btn.disabled = true; btn.textContent = "生成中...";
+  showMsg(msg, "正在生成文案，请稍等...", true);
   try {
-    const r = await api("/api/ai/generate", {
+    const r = await api("/api/ai/text", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         topic,
         style: $("aiStyle").value.trim(),
         extra: $("aiExtra").value.trim(),
-        image_count: count,
       }),
     });
-    const n = (r.material.images || []).length;
-    let text = `已生成《${r.material.title}》`;
-    text += n ? `，配图 ${n} 张，已存入素材库` : "，未见配图";
+    clearMatForm();
+    $("matTitle").value = r.title || "";
+    $("matDesc").value = r.desc || "";
+    $("matTopics").value = (r.topics || []).join(",");
+    showMsg(msg, `已填入下面的表单：《${r.title}》。选好图片后点「保存到素材库」。`, true);
+    $("matFormTitle").scrollIntoView({ behavior: "smooth", block: "center" });
+  } catch (e) {
+    showMsg(msg, e.message, false);
+  } finally {
+    btn.disabled = false; btn.textContent = "生成文案";
+  }
+};
+
+/* 只生成配图，可追加到已有素材或新建一条 */
+$("btnAiImage").onclick = async () => {
+  const msg = $("aiImgMsg");
+  const prompt = $("aiImgPrompt").value.trim();
+  if (!prompt) return showMsg(msg, "先填画面描述", false);
+  const count = Math.max(1, Number($("aiImgCount").value) || 1);
+  const btn = $("btnAiImage");
+  btn.disabled = true; btn.textContent = "生成中...";
+  showMsg(msg, `正在生成 ${count} 张图（免费额度要串行，大约 ${count * 20} 秒）...`, true);
+  try {
+    const r = await api("/api/ai/images", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt, count, material_id: $("aiImgTarget").value }),
+    });
     const errs = r.image_errors || [];
-    if (errs.length) text += `　⚠️ ${errs.length} 张配图失败：${errs[0]}`;
-    showMsg(msg, text, !(count && errs.length && !n));
-    $("aiTopic").value = "";
+    let text = `成功 ${r.added} 张，已${r.target === "existing" ? "追加到该素材" : "存为新素材"}`;
+    if (errs.length) text += `　⚠️ ${errs.length} 张失败：${errs[0]}`;
+    showMsg(msg, text, !errs.length);
     loadMaterials();
   } catch (e) {
     showMsg(msg, e.message, false);
   } finally {
-    $("btnAiGenerate").disabled = false;
+    btn.disabled = false; btn.textContent = "生成配图";
   }
 };
 
@@ -1039,6 +1084,17 @@ async function loadMaterials() {
   state.matSelected = new Set([...state.matSelected].filter((id) => alive.has(id)));
   $("matCount").textContent = materials.length;
   $("matEmpty").style.display = materials.length ? "none" : "block";
+
+  // 「生成配图」选择要追加到哪条素材
+  const sel = $("aiImgTarget"); const keepSel = sel.value;
+  sel.innerHTML = '<option value="">新建一条素材</option>';
+  materials.forEach((m) => {
+    const o = document.createElement("option");
+    o.value = m.id;
+    o.textContent = `${m.title}（现有 ${(m.images || []).length} 图）`;
+    sel.appendChild(o);
+  });
+  sel.value = materials.some((m) => m.id === keepSel) ? keepSel : "";
 
   const grid = $("matGrid"); grid.innerHTML = "";
   materials.forEach((m) => {

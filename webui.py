@@ -473,11 +473,21 @@ def _build_note_messages(topic: str, style: str, count: int, extra: str = "") ->
         '  "title": "标题，20 字以内，有钩子",\n'
         '  "desc": "正文，250-450 字，分 3-5 段，口语化，可带 emoji，结尾引导评论",\n'
         '  "topics": ["话题1", "话题2"],\n'
-        '  "image_prompts": ["英文绘图提示词"]\n'
+        '  "image_style": "英文，所有配图共用的统一风格与色调",\n'
+        '  "image_prompts": ["英文画面1", "英文画面2"]\n'
         "}\n"
         "topics 给 5-8 个，不带 # 号。\n"
-        f"image_prompts 数量必须等于 {count}，每个描述具体画面、构图、色调，"
-        "是给文生图模型用的英文提示词，画面里不要出现文字或水印。"
+        "\n"
+        f"配图要求（很重要，必须严格遵守）：\n"
+        f"1. image_prompts 数量必须等于 {count}。\n"
+        "2. 这几张图必须是【同一个主体/同一个场景】的不同视角或细节，"
+        "像同一组照片，而不是几个不相干的画面。"
+        "比如第 1 张整体环境、第 2 张特写、第 3 张使用中、第 4 张细节质感。\n"
+        "3. 主体、色调、光线、构图风格必须一致；只换机位和景别，不要换主题。\n"
+        "4. 统一风格写进 image_style（例如 flat illustration, warm soft light, "
+        "clean minimal background, muted earth tones），"
+        "image_prompts 里【不要】再重复风格词，只描述画面内容。\n"
+        "5. 画面里不要出现任何文字、水印、logo。"
     )
     if extra.strip():
         user += f"\n\n补充要求（必须遵守，优先级高于上面的默认风格）：\n{extra.strip()}"
@@ -663,6 +673,163 @@ def generate_images(prompts: list[str], cfg: dict) -> tuple[dict[int, bytes], li
     return blobs, errors
 
 
+def expand_image_prompts(base: str, count: int, cfg: dict) -> list[str]:
+    """把一句画面描述扩成 count 条「同一主体、不同视角」的提示词。
+
+    文案模型没配置或调用失败时退化成同一句重复 —— 靠不同随机 seed 出变体，
+    变化少些，但风格一致、不会跑题。
+    """
+    if count <= 1:
+        return [base]
+    provider = (cfg.get("text_provider") or "openai").lower()
+    ready = provider == "pollinations" or bool((cfg.get("text_api_key") or "").strip())
+    if not ready:
+        return [base] * count
+
+    system = "你是文生图提示词工程师，只输出 JSON，不要解释。"
+    user = (
+        f"画面描述：{base}\n"
+        f"需要 {count} 张配图。\n\n"
+        "输出这个 JSON：\n"
+        "{\n"
+        '  "image_style": "英文，所有配图共用的统一风格与色调",\n'
+        '  "image_prompts": ["英文画面1", "英文画面2"]\n'
+        "}\n\n"
+        f"要求：image_prompts 数量等于 {count}，必须是【同一主体/场景】的不同视角或细节"
+        "（整体、特写、使用中、细节质感…），主体、色调、光线保持一致，"
+        "只换机位和景别。统一风格写在 image_style 里，"
+        "image_prompts 里不要再重复风格词。画面里不要出现文字水印。"
+    )
+    try:
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        if provider == "pollinations":
+            content = _pollinations_text(messages, cfg)
+        else:
+            data = _openai_post(
+                cfg["text_base_url"],
+                "/chat/completions",
+                cfg["text_api_key"],
+                {"model": cfg["text_model"], "messages": messages, "temperature": 0.8},
+            )
+            content = data["choices"][0]["message"]["content"]
+        note = _parse_json_block(content)
+        prompts = [
+            str(p).strip() for p in (note.get("image_prompts") or []) if str(p).strip()
+        ][:count]
+        style = str(note.get("image_style") or "").strip()
+        if style:
+            prompts = [f"{p}, {style}" for p in prompts]
+        if len(prompts) == count:
+            return prompts
+    except Exception as exc:
+        print(f"[ai] 扩写绘图提示词失败，改为重复同一句：{exc}")
+    return [base] * count
+
+
+@app.post("/api/ai/text")
+def api_ai_text(payload: dict) -> Any:
+    """只生成文案，不落库。
+
+    前端把它填进「新建素材」表单，用户自己选图后再保存 ——
+    大多数人要的就是「AI 写文案 + 自己配图」。
+    """
+    topic = (payload.get("topic") or "").strip()
+    if not topic:
+        return err("请先填写主题")
+    style = (payload.get("style") or "").strip()
+    extra = (payload.get("extra") or "").strip()
+    try:
+        note = ai_write_note(topic, style, 0, ai_config(), extra)
+    except Exception as exc:
+        return err(f"文案生成失败：{exc}")
+    return {
+        "ok": True,
+        "title": str(note.get("title") or topic).strip(),
+        "desc": str(note.get("desc") or "").strip(),
+        "topics": [
+            str(t).lstrip("#").strip()
+            for t in (note.get("topics") or [])
+            if str(t).strip()
+        ],
+    }
+
+
+@app.post("/api/ai/images")
+def api_ai_images(payload: dict) -> Any:
+    """只生成配图，可追加到已有素材，也可以新建一条。"""
+    prompt = (payload.get("prompt") or "").strip()
+    if not prompt:
+        return err("请先填写画面描述")
+    try:
+        count = max(1, min(6, int(payload.get("count", 1))))
+    except (TypeError, ValueError):
+        count = 1
+    target_id = str(payload.get("material_id") or "").strip()
+
+    cfg = ai_config()
+    image_ready = (
+        (cfg.get("image_provider") or "pollinations").lower() == "pollinations"
+        or bool((cfg.get("image_api_key") or "").strip())
+    )
+    if not image_ready:
+        return err("还没有配置绘图服务")
+
+    prompts = expand_image_prompts(prompt, count, cfg)
+    LIBRARY_MEDIA.mkdir(parents=True, exist_ok=True)
+    stamp = str(int(time.time() * 1000))
+    blobs, image_errors = generate_images(prompts, cfg)
+
+    saved: list[str] = []
+    for index in sorted(blobs):
+        file = LIBRARY_MEDIA / f"{stamp}_ai{index}{_image_ext(blobs[index])}"
+        file.write_bytes(blobs[index])
+        saved.append(str(file))
+
+    items = load_library()
+    material = next((m for m in items if str(m.get("id")) == target_id), None)
+    if material is not None:
+        material["images"] = list(material.get("images") or []) + saved
+        material["media_type"] = "image"
+        material["updated_at"] = int(time.time())
+        if saved and material.get("video"):
+            material["video"] = ""      # 图文和视频不能混
+        save_library(items)
+        return {
+            "ok": True,
+            "material": material,
+            "added": len(saved),
+            "image_errors": image_errors,
+            "target": "existing",
+        }
+
+    # 没指定目标就新建一条，标题取描述前 20 字
+    material = {
+        "id": str(int(time.time() * 1000)),
+        "title": prompt[:20],
+        "desc": "",
+        "topics": [],
+        "location": "",
+        "created_at": int(time.time()),
+        "media_type": "image",
+        "images": saved,
+        "source": "ai-image",
+        "ai_prompt": prompt,
+    }
+    if saved:
+        items.insert(0, material)
+        save_library(items)
+    return {
+        "ok": True,
+        "material": material,
+        "added": len(saved),
+        "image_errors": image_errors,
+        "target": "new",
+    }
+
+
 @app.post("/api/ai/generate")
 def api_ai_generate(payload: dict) -> Any:
     topic = (payload.get("topic") or "").strip()
@@ -685,6 +852,12 @@ def api_ai_generate(payload: dict) -> Any:
     desc = str(note.get("desc") or "").strip()
     topics = [str(t).lstrip("#").strip() for t in (note.get("topics") or []) if str(t).strip()]
     prompts = [str(p).strip() for p in (note.get("image_prompts") or []) if str(p).strip()][:count]
+
+    # 把统一风格拼到每条提示词后面。模型自由发挥时每张图会各写各的风格，
+    # 出图就变成三张不相干的画；抽一个共用风格拼上去，至少风格是统一的。
+    image_style = str(note.get("image_style") or "").strip()
+    if image_style:
+        prompts = [f"{p}, {image_style}" for p in prompts]
 
     # 配图并发生成：逐张串行会等到天荒地老
     images: list[str] = []
@@ -716,10 +889,11 @@ def api_ai_generate(payload: dict) -> Any:
         "ai_topic": topic,
         "ai_style": style,
     }
-    if images:
-        items = load_library()
-        items.insert(0, material)
-        save_library(items)
+    # 之前是「有图才保存」，导致配图数量填 0 时文案直接丢了。
+    # 文案本身就有价值，一律入库。
+    items = load_library()
+    items.insert(0, material)
+    save_library(items)
 
     return {
         "ok": True,
