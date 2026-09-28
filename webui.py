@@ -564,6 +564,8 @@ def _pollinations_image(prompt: str, cfg: dict) -> bytes:
     # cogview-3-flash），传给 Pollinations 会报模型不存在。Pollinations 目前
     # 只有一个模型，不传就是用它自己的默认值。
     resp = requests.get(url, timeout=180)
+    if resp.status_code == 429:
+        raise RuntimeError("Pollinations 限流（429 请求过多）")
     resp.raise_for_status()
     ctype = (resp.headers.get("content-type") or "").lower()
     if not ctype.startswith("image/"):
@@ -603,6 +605,64 @@ def ai_make_image(prompt: str, cfg: dict) -> bytes:
     return resp.content
 
 
+def _image_ext(blob: bytes) -> str:
+    """按图片内容的魔数决定扩展名。
+
+    Pollinations 的免费额度会把 1024x1536 降采样后返回 JPEG，
+    如果一律存成 .png，FileResponse 会按扩展名报 image/png，
+    内容其实是 JPEG —— 浏览器能嗅探出来，但不严谨。
+    """
+    if blob[:2] == b"\xff\xd8":
+        return ".jpg"
+    if blob[:4] == b"\x89PNG":
+        return ".png"
+    if blob[:4] == b"RIFF" and blob[8:12] == b"WEBP":
+        return ".webp"
+    return ".png"
+
+
+def generate_images(prompts: list[str], cfg: dict) -> tuple[dict[int, bytes], list[str]]:
+    """按服务商特性决定出图策略，返回 (序号->图片字节, 错误列表)。
+
+    Pollinations 的匿名额度对并发很敏感：4 张图同时发会直接被打回 429，
+    实测只能出 1 张。所以它走串行 + 限流重试，并在每张之间留点间隔。
+    OpenAI 兼容的图片接口没有这个问题，保持并发以缩短等待。
+    """
+    provider = (cfg.get("image_provider") or "pollinations").lower()
+    blobs: dict[int, bytes] = {}
+    errors: list[str] = []
+
+    if provider == "pollinations":
+        for index, prompt in enumerate(prompts):
+            for attempt in range(3):
+                try:
+                    blobs[index] = _pollinations_image(prompt, cfg)
+                    break
+                except Exception as exc:
+                    message = str(exc)
+                    if "429" in message and attempt < 2:
+                        wait = 6 * (attempt + 1)
+                        print(f"[ai] Pollinations 限流，{wait} 秒后重试第 {index + 1} 张")
+                        time.sleep(wait)
+                        continue
+                    errors.append(f"第 {index + 1} 张：{message}")
+                    break
+            if index < len(prompts) - 1:
+                time.sleep(random.uniform(3.0, 5.0))   # 别把匿名额度打爆
+        return blobs, errors
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=min(4, len(prompts))) as pool:
+        futures = {pool.submit(ai_make_image, p, cfg): i for i, p in enumerate(prompts)}
+        for future, index in futures.items():
+            try:
+                blobs[index] = future.result()
+            except Exception as exc:
+                errors.append(f"第 {index + 1} 张：{exc}")
+    return blobs, errors
+
+
 @app.post("/api/ai/generate")
 def api_ai_generate(payload: dict) -> Any:
     topic = (payload.get("topic") or "").strip()
@@ -635,20 +695,11 @@ def api_ai_generate(payload: dict) -> Any:
         or bool((cfg.get("image_api_key") or "").strip())
     )
     if count and prompts and image_ready:
-        from concurrent.futures import ThreadPoolExecutor
-
         LIBRARY_MEDIA.mkdir(parents=True, exist_ok=True)
         stamp = str(int(time.time() * 1000))
-        with ThreadPoolExecutor(max_workers=min(4, len(prompts))) as pool:
-            futures = {pool.submit(ai_make_image, p, cfg): i for i, p in enumerate(prompts)}
-            blobs: dict[int, bytes] = {}
-            for future, index in futures.items():
-                try:
-                    blobs[index] = future.result()
-                except Exception as exc:
-                    image_errors.append(str(exc))
+        blobs, image_errors = generate_images(prompts, cfg)
         for index in sorted(blobs):
-            target = LIBRARY_MEDIA / f"{stamp}_ai{index}.png"
+            target = LIBRARY_MEDIA / f"{stamp}_ai{index}{_image_ext(blobs[index])}"
             target.write_bytes(blobs[index])
             images.append(str(target))
 
