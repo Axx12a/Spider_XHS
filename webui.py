@@ -879,8 +879,10 @@ def api_library_file(material_id: str, index: int) -> Any:
 PUBLISH_JOBS: dict[str, dict] = {}
 _PUBLISH_LOCK = threading.Lock()
 PUBLISH_JOB_KEEP = 10          # 内存里只保留最近 N 个任务
-DEFAULT_DELAY_MIN = 120        # 默认 2 分钟
-DEFAULT_DELAY_MAX = 300        # 默认 5 分钟
+# 默认按「跑矩阵」的场景给：一个账号一天本来就只该发一两条，
+# 几十条任务摊到十几分钟一条，整批会跑几个小时，属于正常节奏。
+DEFAULT_DELAY_MIN = 600        # 默认 10 分钟
+DEFAULT_DELAY_MAX = 1200       # 默认 20 分钟
 
 
 def _job_patch(job_id: str, **fields: Any) -> None:
@@ -936,39 +938,72 @@ def _publish_worker(
         _job_patch(job_id, next_at=0)
         return True
 
+    # 排任务顺序。原顺序是「账号A 发完全部笔记 → 账号B 再发全部笔记」，
+    # 跑矩阵时同一批内容会在很短的窗口里集中出现在多个账号上，这是最典型的
+    # 矩阵特征。纯随机打乱还不够：同一素材仍可能连着落到不同账号。
+    # 这里用贪心，尽量保证相邻两条「素材不同、账号也不同」，
+    # 让同一条笔记落到各账号的时间被摊到最开。
+    pool = [(a, m) for a in account_names for m in picked]
+    random.shuffle(pool)
+    tasks: list[tuple[str, dict]] = []
+    last_material = last_account = None
+    while pool:
+        pick = next(
+            (
+                i
+                for i, (a, m) in enumerate(pool)
+                if m.get("id") != last_material and a != last_account
+            ),
+            None,
+        )
+        if pick is None:
+            pick = next(
+                (i for i, (_a, m) in enumerate(pool) if m.get("id") != last_material),
+                0,
+            )
+        account, material = pool.pop(pick)
+        tasks.append((account, material))
+        last_material, last_account = material.get("id"), account
+
+    auths: dict[str, Any] = {}   # 复用登录态，避免每条都重新 bootstrap
+    apis: dict[str, Any] = {}
+
+    def close_account(name: str) -> None:
+        auth = auths.pop(name, None)
+        apis.pop(name, None)
+        if auth is not None:
+            try:
+                auth.close()
+            except Exception:
+                pass
+
     try:
-        for name in account_names:
+        for name, material in tasks:
             if _job_cancelled(job_id):
                 break
+            title = material.get("title", "")
             try:
-                auth = build_auth(name)
+                if name not in apis:
+                    auths[name] = build_auth(name)
+                    apis[name] = XHS_Creator_Apis(auths[name].creator).bootstrap()
+                ok, message, _ = apis[name].post_note(
+                    material_to_note(material, privacy, post_time)
+                )
+                record(name, title, ok, message)
             except Exception as exc:
-                for material in picked:
-                    record(name, material.get("title", ""), False, str(exc))
-                if not wait_between():
-                    break
-                continue
-            try:
-                api = XHS_Creator_Apis(auth.creator).bootstrap()
-                for material in picked:
-                    if _job_cancelled(job_id):
-                        break
-                    title = material.get("title", "")
-                    try:
-                        ok, message, _ = api.post_note(
-                            material_to_note(material, privacy, post_time)
-                        )
-                        record(name, title, ok, message)
-                    except Exception as exc:
-                        record(name, title, False, str(exc))
-                    if not wait_between():
-                        break
-            finally:
-                auth.close()
+                record(name, title, False, str(exc))
+                # 只有登录态真的坏了才丢弃会话，其它错误（比如内容被拒）不影响后续
+                if classify_account_error(exc)[0] == "expired":
+                    close_account(name)
+            if not wait_between():
+                break
     except Exception as exc:
         traceback.print_exc()
         _job_patch(job_id, status="error", message=str(exc), next_at=0)
         return
+    finally:
+        for name in list(auths):
+            close_account(name)
 
     cancelled = _job_cancelled(job_id)
     _job_patch(

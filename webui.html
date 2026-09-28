@@ -263,10 +263,10 @@
       </div>
       <div class="row" style="margin-top:12px">
         <div class="field"><label>每条间隔最少（秒）</label>
-          <input id="pubDelayMin" type="number" min="0" step="10" value="120" style="width:140px">
+          <input id="pubDelayMin" type="number" min="0" step="30" value="600" style="width:140px">
         </div>
         <div class="field"><label>最多（秒）</label>
-          <input id="pubDelayMax" type="number" min="0" step="10" value="300" style="width:140px">
+          <input id="pubDelayMax" type="number" min="0" step="30" value="1200" style="width:140px">
         </div>
         <button id="btnPublish">开始发布</button>
         <button class="ghost" id="btnCancelPublish" style="display:none">停止</button>
@@ -275,6 +275,10 @@
         可见范围取值含义上游仓库未说明，且没有删除笔记的接口，建议先发一篇确认「1」的实际效果。
         <br>
         每条之间会在上面这个区间内<b>随机</b>等待 —— 固定间隔本身就是风控特征，别设得太短。
+        默认 10~20 分钟是按<b>跑矩阵</b>给的：一个账号一天本来就只该发一两条，
+        几十条任务摊到十几分钟一条，整批跑几个小时属于正常节奏。
+        <br>
+        发布顺序会<b>打乱</b>，避免「账号A发完全部笔记再轮到账号B」这种集中投放。
         发布在后台执行，可以切走或关掉这个页面；间隔设成几分钟时，整批可能要跑很久。
       </p>
       <div id="publishProgress" style="display:none;margin-top:14px">
@@ -856,9 +860,18 @@ $("btnPublish").onclick = async () => {
   const total = materials.length * accounts.length;
   const estMin = Math.round((total * ((dmin + dmax) / 2 + 3)) / 60);
 
+  // 矩阵最容易触发风控的不是频率，而是「同一批内容出现在多个账号上」
+  let dupWarn = "";
+  if (accounts.length > 1 && materials.length > 1) {
+    dupWarn = `\n\n⚠️ 你选的是 ${materials.length} 条笔记 × ${accounts.length} 个账号，`
+      + `同一批内容会出现在多个账号上。矩阵被限流最常见的原因就是这个，`
+      + `建议给不同账号准备不同素材。`;
+  }
   if (!confirm(
     `将 ${materials.length} 条笔记发布到 ${accounts.length} 个账号，共 ${total} 次。\n`
-    + `每条之间随机等待 ${dmin}~${dmax} 秒，预计约 ${estMin} 分钟完成。\n\n确认开始？`
+    + `每条之间随机等待 ${dmin}~${dmax} 秒，顺序随机打乱，预计约 ${estMin} 分钟完成。`
+    + dupWarn
+    + `\n\n确认开始？`
   )) return;
 
   $("btnPublish").disabled = true;
