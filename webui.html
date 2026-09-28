@@ -260,12 +260,29 @@
           <select id="pubPrivacy"><option value="1">1（默认）</option><option value="0">0</option></select>
         </div>
         <div class="field grow"><label>定时发布（留空立即发布）</label><input id="pubAt" type="datetime-local"></div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <div class="field"><label>每条间隔最少（秒）</label>
+          <input id="pubDelayMin" type="number" min="0" step="10" value="120" style="width:140px">
+        </div>
+        <div class="field"><label>最多（秒）</label>
+          <input id="pubDelayMax" type="number" min="0" step="10" value="300" style="width:140px">
+        </div>
         <button id="btnPublish">开始发布</button>
+        <button class="ghost" id="btnCancelPublish" style="display:none">停止</button>
       </div>
       <p class="muted" style="margin:10px 0 0">
         可见范围取值含义上游仓库未说明，且没有删除笔记的接口，建议先发一篇确认「1」的实际效果。
-        多账号 × 多笔记会逐条发布，每条之间间隔 2 秒。
+        <br>
+        每条之间会在上面这个区间内<b>随机</b>等待 —— 固定间隔本身就是风控特征，别设得太短。
+        发布在后台执行，可以切走或关掉这个页面；间隔设成几分钟时，整批可能要跑很久。
       </p>
+      <div id="publishProgress" style="display:none;margin-top:14px">
+        <div style="height:6px;background:#eef1f4;border-radius:3px;overflow:hidden">
+          <div id="pubBar" style="height:100%;width:0;background:var(--brand);transition:width .3s"></div>
+        </div>
+        <p class="muted" id="pubProgressText" style="margin:8px 0 0"></p>
+      </div>
       <div class="msg" id="publishMsg"></div>
     </div>
     <div class="card" id="resultCard" style="display:none">
@@ -779,17 +796,75 @@ function renderPickList() {
   });
 }
 
+/* 发布是长任务（间隔几分钟时整批要跑很久），所以放后台执行 + 轮询进度。
+   任务 id 存 localStorage，刷新页面也能接着看进度。 */
+let currentJobId = localStorage.getItem("pubJob") || "";
+
+function renderJob(job) {
+  const pct = job.total ? Math.round((job.done / job.total) * 100) : 0;
+  $("publishProgress").style.display = "block";
+  $("pubBar").style.width = pct + "%";
+  let text = `进度 ${job.done}/${job.total}　成功 ${job.succeeded}`;
+  if (job.status === "running" && job.next_at) {
+    const sec = Math.max(0, Math.round(job.next_at - Date.now() / 1000));
+    text += sec >= 60 ? `　下一条约 ${Math.ceil(sec / 60)} 分钟后` : `　下一条约 ${sec} 秒后`;
+  } else if (job.status !== "running") {
+    text += "　已结束";
+  }
+  $("pubProgressText").textContent = text;
+
+  const rows = $("resultRows"); rows.innerHTML = "";
+  (job.results || []).forEach((x) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${x.account}</td><td>${x.title}</td>
+      <td style="color:${x.ok ? "#1a7f37" : "#b3122b"}">${x.ok ? "成功" : "失败"}：${x.message}</td>`;
+    rows.appendChild(tr);
+  });
+  $("resultCard").style.display = (job.results || []).length ? "block" : "none";
+}
+
+async function pollJob() {
+  if (!currentJobId) return;
+  let job;
+  try {
+    ({ job } = await api("/api/publish/job/" + currentJobId));
+  } catch {
+    currentJobId = ""; localStorage.removeItem("pubJob"); return;
+  }
+  renderJob(job);
+  if (job.status === "running") { setTimeout(pollJob, 2000); return; }
+
+  currentJobId = "";
+  localStorage.removeItem("pubJob");
+  $("btnCancelPublish").style.display = "none";
+  $("btnPublish").disabled = false;
+  const label = job.status === "done" ? "全部完成"
+    : job.status === "cancelled" ? "已停止" : "出错";
+  showMsg($("publishMsg"), `${label}：成功 ${job.succeeded} / 共 ${job.total}`,
+          job.status === "done" && job.succeeded === job.total);
+}
+
 $("btnPublish").onclick = async () => {
   const msg = $("publishMsg");
   const accounts = [...$("pubAccounts").querySelectorAll("input:checked")].map((i) => i.value);
   const materials = [...state.pickedMaterials];
   if (!accounts.length) return showMsg(msg, "请至少勾选一个账号", false);
   if (!materials.length) return showMsg(msg, "请至少勾选一条笔记", false);
-  if (!confirm(`将 ${materials.length} 条笔记发布到 ${accounts.length} 个账号，共 ${materials.length*accounts.length} 次发布，确认？`)) return;
+
+  const dmin = Math.max(0, Number($("pubDelayMin").value) || 0);
+  const dmax = Math.max(dmin, Number($("pubDelayMax").value) || 0);
+  const total = materials.length * accounts.length;
+  const estMin = Math.round((total * ((dmin + dmax) / 2 + 3)) / 60);
+
+  if (!confirm(
+    `将 ${materials.length} 条笔记发布到 ${accounts.length} 个账号，共 ${total} 次。\n`
+    + `每条之间随机等待 ${dmin}~${dmax} 秒，预计约 ${estMin} 分钟完成。\n\n确认开始？`
+  )) return;
 
   $("btnPublish").disabled = true;
-  showMsg(msg, `发布中，共 ${materials.length*accounts.length} 次，请勿关闭页面...`, true);
   $("resultCard").style.display = "none";
+  $("publishProgress").style.display = "none";
+  showMsg(msg, "已提交，正在后台执行...", true);
   try {
     const r = await api("/api/publish/batch", {
       method: "POST",
@@ -798,19 +873,26 @@ $("btnPublish").onclick = async () => {
         accounts, materials,
         privacy: $("pubPrivacy").value,
         schedule_at: $("pubAt").value,
+        delay_min: dmin,
+        delay_max: dmax,
       }),
     });
-    const rows = $("resultRows"); rows.innerHTML = "";
-    r.results.forEach((x) => {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `<td>${x.account}</td><td>${x.title}</td>
-        <td style="color:${x.ok ? "#1a7f37" : "#b3122b"}">${x.ok ? "成功" : "失败"}：${x.message}</td>`;
-      rows.appendChild(tr);
-    });
-    $("resultCard").style.display = "block";
-    showMsg(msg, `完成：成功 ${r.succeeded} / 共 ${r.total}`, r.succeeded === r.total);
-  } catch (e) { showMsg(msg, e.message, false); }
-  finally { $("btnPublish").disabled = false; }
+    currentJobId = r.job.id;
+    localStorage.setItem("pubJob", currentJobId);
+    $("btnCancelPublish").style.display = "";
+    renderJob(r.job);
+    pollJob();
+  } catch (e) {
+    showMsg(msg, e.message, false);
+    $("btnPublish").disabled = false;
+  }
+};
+
+$("btnCancelPublish").onclick = async () => {
+  if (!currentJobId) return;
+  if (!confirm("停止剩余发布？已经发出去的不会撤回。")) return;
+  try { await api(`/api/publish/job/${currentJobId}/cancel`, { method: "POST" }); } catch {}
+  showMsg($("publishMsg"), "已请求停止，当前这条发完就会中断", true);
 };
 
 /* ---------------- 私信 ---------------- */
@@ -1170,6 +1252,14 @@ connectEvents();
     }
   } catch {}
 })();
+
+// 刷新页面后如果还有发布任务在后台跑，继续显示进度
+if (currentJobId) {
+  $("btnPublish").disabled = true;
+  $("btnCancelPublish").style.display = "";
+  showMsg($("publishMsg"), "上次的发布任务还在后台执行，正在同步进度...", true);
+  pollJob();
+}
 
 // 每 5 秒拉一次监控状态；勾选「自动刷新」即可在任意页签收到新消息提示
 setInterval(() => { if ($("dmAuto").checked) pollMonitor(); }, 5000);

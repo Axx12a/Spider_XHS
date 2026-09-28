@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import io
 import json
+import random
 import re
 import socket
 import subprocess
@@ -873,6 +874,114 @@ def api_library_file(material_id: str, index: int) -> Any:
 # --------------------------------------------------------------------------- #
 
 
+# 发布任务：长任务放后台跑，前端轮询进度。
+# 如果按同步请求处理，间隔几分钟时一个请求要挂几十分钟，浏览器早断了。
+PUBLISH_JOBS: dict[str, dict] = {}
+_PUBLISH_LOCK = threading.Lock()
+PUBLISH_JOB_KEEP = 10          # 内存里只保留最近 N 个任务
+DEFAULT_DELAY_MIN = 120        # 默认 2 分钟
+DEFAULT_DELAY_MAX = 300        # 默认 5 分钟
+
+
+def _job_patch(job_id: str, **fields: Any) -> None:
+    with _PUBLISH_LOCK:
+        job = PUBLISH_JOBS.get(job_id)
+        if job is not None:
+            job.update(fields)
+
+
+def _job_cancelled(job_id: str) -> bool:
+    with _PUBLISH_LOCK:
+        return bool(PUBLISH_JOBS.get(job_id, {}).get("cancel"))
+
+
+def _publish_worker(
+    job_id: str,
+    account_names: list[str],
+    picked: list[dict],
+    privacy: int,
+    post_time: int | None,
+    delay_min: float,
+    delay_max: float,
+) -> None:
+    from apis.xhs_creator_apis import XHS_Creator_Apis
+
+    total = len(account_names) * len(picked)
+    results: list[dict] = []
+
+    def record(account: str, title: str, ok: bool, message: str) -> None:
+        results.append(
+            {"account": account, "title": title, "ok": bool(ok), "message": str(message)}
+        )
+        _job_patch(
+            job_id,
+            results=list(results),
+            done=len(results),
+            succeeded=sum(1 for r in results if r["ok"]),
+        )
+
+    def wait_between() -> bool:
+        """到下一条之前等待；被取消则返回 False。"""
+        if len(results) >= total:
+            return True
+        wait = random.uniform(delay_min, delay_max)  # 随机抖动，固定间隔本身也是特征
+        if wait <= 0:
+            return True
+        end = time.time() + wait
+        _job_patch(job_id, next_at=end)
+        while time.time() < end:
+            if _job_cancelled(job_id):
+                return False
+            time.sleep(0.5)
+        _job_patch(job_id, next_at=0)
+        return True
+
+    try:
+        for name in account_names:
+            if _job_cancelled(job_id):
+                break
+            try:
+                auth = build_auth(name)
+            except Exception as exc:
+                for material in picked:
+                    record(name, material.get("title", ""), False, str(exc))
+                if not wait_between():
+                    break
+                continue
+            try:
+                api = XHS_Creator_Apis(auth.creator).bootstrap()
+                for material in picked:
+                    if _job_cancelled(job_id):
+                        break
+                    title = material.get("title", "")
+                    try:
+                        ok, message, _ = api.post_note(
+                            material_to_note(material, privacy, post_time)
+                        )
+                        record(name, title, ok, message)
+                    except Exception as exc:
+                        record(name, title, False, str(exc))
+                    if not wait_between():
+                        break
+            finally:
+                auth.close()
+    except Exception as exc:
+        traceback.print_exc()
+        _job_patch(job_id, status="error", message=str(exc), next_at=0)
+        return
+
+    cancelled = _job_cancelled(job_id)
+    _job_patch(
+        job_id,
+        status="cancelled" if cancelled else "done",
+        finished_at=time.time(),
+        next_at=0,
+        results=list(results),
+        done=len(results),
+        succeeded=sum(1 for r in results if r["ok"]),
+    )
+
+
 @app.post("/api/publish/batch")
 def api_publish_batch(payload: dict) -> Any:
     account_names = payload.get("accounts") or []
@@ -888,42 +997,66 @@ def api_publish_batch(payload: dict) -> Any:
     except ValueError as exc:
         return err(str(exc))
 
-    from apis.xhs_creator_apis import XHS_Creator_Apis
+    try:
+        delay_min = float(payload.get("delay_min", DEFAULT_DELAY_MIN))
+        delay_max = float(payload.get("delay_max", DEFAULT_DELAY_MAX))
+    except (TypeError, ValueError):
+        return err("间隔时间必须是数字")
+    delay_min = max(0.0, delay_min)
+    delay_max = max(delay_min, delay_max)
 
     pool = {m.get("id"): m for m in load_library()}
     picked = [pool[i] for i in material_ids if i in pool]
     if not picked:
         return err("勾选的笔记在素材库里已不存在")
 
-    results: list[dict] = []
-    for name in account_names:
-        try:
-            auth = build_auth(name)
-        except Exception as exc:
-            for material in picked:
-                results.append(
-                    {"account": name, "title": material.get("title", ""), "ok": False, "message": str(exc)}
-                )
-            continue
-        try:
-            api = XHS_Creator_Apis(auth.creator).bootstrap()
-            for material in picked:
-                title = material.get("title", "")
-                try:
-                    ok, message, _ = api.post_note(material_to_note(material, privacy, post_time))
-                    results.append(
-                        {"account": name, "title": title, "ok": bool(ok), "message": str(message)}
-                    )
-                except Exception as exc:
-                    results.append(
-                        {"account": name, "title": title, "ok": False, "message": str(exc)}
-                    )
-                time.sleep(2)  # 连续发布之间留点间隔，降低风控概率
-        finally:
-            auth.close()
+    job_id = f"{int(time.time() * 1000):x}"
+    with _PUBLISH_LOCK:
+        PUBLISH_JOBS[job_id] = {
+            "id": job_id,
+            "status": "running",
+            "total": len(account_names) * len(picked),
+            "done": 0,
+            "succeeded": 0,
+            "results": [],
+            "message": "",
+            "cancel": False,
+            "started_at": time.time(),
+            "finished_at": 0,
+            "next_at": 0,
+            "delay_min": delay_min,
+            "delay_max": delay_max,
+        }
+        # 只留最近若干个任务
+        if len(PUBLISH_JOBS) > PUBLISH_JOB_KEEP:
+            for old in sorted(PUBLISH_JOBS, key=lambda k: PUBLISH_JOBS[k]["started_at"])[
+                : len(PUBLISH_JOBS) - PUBLISH_JOB_KEEP
+            ]:
+                PUBLISH_JOBS.pop(old, None)
 
-    succeeded = sum(1 for r in results if r["ok"])
-    return {"ok": True, "results": results, "succeeded": succeeded, "total": len(results)}
+    threading.Thread(
+        target=_publish_worker,
+        args=(job_id, list(account_names), picked, privacy, post_time, delay_min, delay_max),
+        daemon=True,
+    ).start()
+    return {"ok": True, "job": dict(PUBLISH_JOBS[job_id])}
+
+
+@app.get("/api/publish/job/{job_id}")
+def api_publish_job(job_id: str) -> Any:
+    with _PUBLISH_LOCK:
+        job = PUBLISH_JOBS.get(job_id)
+        return {"ok": True, "job": dict(job)} if job else err("任务不存在", 404)
+
+
+@app.post("/api/publish/job/{job_id}/cancel")
+def api_publish_job_cancel(job_id: str) -> Any:
+    with _PUBLISH_LOCK:
+        job = PUBLISH_JOBS.get(job_id)
+        if not job:
+            return err("任务不存在", 404)
+        job["cancel"] = True
+    return {"ok": True}
 
 
 # --------------------------------------------------------------------------- #
