@@ -190,6 +190,10 @@
       <div class="msg" id="accountMsg"></div>
     </div>
     <div class="card">
+      <div class="row" style="justify-content:space-between;margin-bottom:12px">
+        <span class="muted">账号状态每 10 秒自动检查一次，无需手动刷新</span>
+        <button class="ghost" id="btnCheckNow">立即检查</button>
+      </div>
       <div class="msg bad" id="expiredBanner"></div>
       <div class="tablewrap">
       <table>
@@ -417,29 +421,19 @@ async function loadAccounts() {
     const cls = STATUS_CLASS[st] || "st-bad";
     const tr = document.createElement("tr");
     tr.innerHTML = `<td><span class="tag">${a.name}</span></td>
-      <td><span class="pill ${cls}" title="${a.status_text || ""}">${text}</span></td>
+      <td><span class="pill ${cls}" data-status-for="${a.name}" title="${a.status_text || ""}">${text}</span></td>
       <td>${a.nickname || "-"}</td>
       <td class="muted">${a.user_id || "-"}</td>
       <td class="muted">${fmtTime(a.saved_at * 1000)}</td>
       <td style="white-space:nowrap">
-        ${st !== "ok" ? `<button data-relogin="${a.name}" style="padding:4px 10px">重新登录</button>` : ""}
+        <button data-relogin="${a.name}" style="padding:4px 10px;${st === "ok" ? "display:none" : ""}">重新登录</button>
         <button class="ghost" data-rename="${a.name}" style="padding:4px 10px">改名</button>
         <button class="ghost" data-del="${a.name}" style="padding:4px 10px">删除</button>
       </td>`;
     rows.appendChild(tr);
   });
 
-  // 顶部提醒：哪些账号需要重新登录
-  const expiredNames = accounts.filter((a) => a.status === "expired").map((a) => a.name);
-  const banner = $("expiredBanner");
-  if (expiredNames.length) {
-    banner.textContent =
-      `有 ${expiredNames.length} 个账号登录态已失效（${expiredNames.join("、")}）。`
-      + `点对应行的「重新登录」扫码即可原地更新，账号名和数据都保留，不用删除重建。`;
-    banner.className = "msg on bad";
-  } else {
-    banner.className = "msg bad";
-  }
+  updateExpiredBanner(accounts);
 
   rows.querySelectorAll("[data-relogin]").forEach((b) => {
     b.onclick = async () => {
@@ -503,6 +497,55 @@ async function loadAccounts() {
   $("headInfo").textContent = accounts.length
     ? `已保存 ${accounts.length} 个账号` : "未保存任何账号";
 }
+
+function updateExpiredBanner(accounts) {
+  const banner = $("expiredBanner");
+  const names = accounts.filter((a) => a.status === "expired").map((a) => a.name);
+  if (names.length) {
+    banner.textContent =
+      `有 ${names.length} 个账号登录态已失效（${names.join("、")}）。`
+      + `点对应行的「重新登录」扫码即可原地更新，账号名和数据都保留，不用删除重建。`;
+    banner.className = "msg on bad";
+  } else {
+    banner.className = "msg bad";
+  }
+}
+
+/* 只增量更新状态列和横幅，不重建表格 ——
+   重建会把发布页已勾选的账号清空，所以这里不能直接调 loadAccounts()。 */
+async function refreshAccountStatuses() {
+  let accounts;
+  try { ({ accounts } = await api("/api/accounts")); } catch { return; }
+  const before = state.accounts.map((a) => a.name).join("|");
+  const now = accounts.map((a) => a.name).join("|");
+  if (before !== now) { await loadAccounts(); return; }   // 账号增删了，整表重建
+
+  state.accounts = accounts;
+  accounts.forEach((a) => {
+    const st = a.status || "unknown";
+    const pill = document.querySelector(`[data-status-for="${CSS.escape(a.name)}"]`);
+    if (pill) {
+      pill.textContent = STATUS_LABEL[st] || "未知";
+      pill.className = "pill " + (STATUS_CLASS[st] || "st-bad");
+      pill.title = a.status_text || "";
+    }
+    const btn = document.querySelector(`[data-relogin="${CSS.escape(a.name)}"]`);
+    if (btn) btn.style.display = st === "ok" ? "none" : "";
+  });
+  updateExpiredBanner(accounts);
+}
+
+$("btnCheckNow").onclick = async () => {
+  const btn = $("btnCheckNow");
+  btn.disabled = true;
+  btn.textContent = "检查中...";
+  try { await api("/api/monitor/refresh", { method: "POST" }); } catch {}
+  setTimeout(async () => {
+    await refreshAccountStatuses();
+    btn.disabled = false;
+    btn.textContent = "立即检查";
+  }, 4000);
+};
 
 let loginTimer = null;
 let lastRunId = 0;
@@ -1131,6 +1174,9 @@ connectEvents();
 // 每 5 秒拉一次监控状态；勾选「自动刷新」即可在任意页签收到新消息提示
 setInterval(() => { if ($("dmAuto").checked) pollMonitor(); }, 5000);
 setTimeout(pollMonitor, 1200);
+
+// 账号状态每 10 秒自动检查一次，失效了不用手动刷页面
+setInterval(refreshAccountStatuses, 10000);
 </script>
 </body>
 </html>

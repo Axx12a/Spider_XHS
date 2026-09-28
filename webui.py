@@ -1611,4 +1611,9 @@ if __name__ == "__main__":
             target=open_browser_when_ready, args=(LISTEN_PORT,), daemon=True
         ).start()
 
+    # 服务一起来就开始检查账号，不必等有人打开网页。
+    # 否则服务重启后如果没人访问，监控其实一直没跑，钉钉也不会推送。
+    start_monitor()
+    print(f"  账号检查已启动：后台每 {_MONITOR['interval']} 秒巡检一轮")
+
     uvicorn.Server(uvicorn.Config(app, log_level="warning")).run(sockets=sockets)
