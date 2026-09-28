@@ -1237,7 +1237,41 @@ def _bind(host: str) -> socket.socket:
     return sock
 
 
+def open_browser_when_ready(port: int, timeout: float = 20.0) -> None:
+    """等端口真的能建立连接后再打开浏览器。
+
+    固定 sleep 几秒不可靠：机器慢的时候 uvicorn 还没开始 accept，
+    浏览器就会先弹出一个「无法访问此网站」。这里改成轮询探测。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                break
+        except OSError:
+            time.sleep(0.25)
+    else:
+        print("（服务启动超时，请手动打开上面的地址）")
+        return
+    try:
+        import webbrowser
+
+        webbrowser.open(f"http://127.0.0.1:{port}")
+    except Exception as exc:
+        print(f"（自动打开浏览器失败：{exc}，请手动打开上面的地址）")
+
+
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Spider_XHS 本地网页控制台")
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="启动后不要自动打开浏览器",
+    )
+    run_args = parser.parse_args()
+
     # 控制台按 UTF-8 输出中文；顺便把窗口标题设成中文
     for _stream in (sys.stdout, sys.stderr):
         try:
@@ -1273,5 +1307,13 @@ if __name__ == "__main__":
     else:
         print("  手机 / 其它设备 ：未检测到 Tailscale 地址，当前只有本机可访问")
     print("  （未监听 0.0.0.0，同一局域网内的其它设备无法访问）")
+
+    if run_args.no_browser:
+        print("  已指定 --no-browser，不自动打开浏览器")
+    else:
+        print("  正在启动浏览器...")
+        threading.Thread(
+            target=open_browser_when_ready, args=(LISTEN_PORT,), daemon=True
+        ).start()
 
     uvicorn.Server(uvicorn.Config(app, log_level="warning")).run(sockets=sockets)
