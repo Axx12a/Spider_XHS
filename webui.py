@@ -435,6 +435,7 @@ def index() -> HTMLResponse:
 
 @app.get("/api/accounts")
 def api_accounts() -> Any:
+    start_monitor()  # 保证账号状态列有数据可看
     if not ACCOUNT_DIR.is_dir():
         return {"ok": True, "accounts": []}
     rows = []
@@ -443,12 +444,24 @@ def api_accounts() -> Any:
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
+        name = data.get("name", path.stem)
+        with _MONITOR_LOCK:
+            info = _MONITOR["accounts"].get(name)
+        if not info:
+            status, status_text = "unknown", "尚未检查"
+        elif not info.get("error_count"):
+            status, status_text = "ok", "正常"
+        else:
+            status = info.get("error_kind") or "unknown"
+            status_text = info.get("error") or "异常"
         rows.append(
             {
-                "name": data.get("name", path.stem),
+                "name": name,
                 "nickname": data.get("nickname") or "",
                 "user_id": data.get("user_id") or "",
                 "saved_at": data.get("saved_at") or 0,
+                "status": status,
+                "status_text": status_text,
             }
         )
     return {"ok": True, "accounts": rows}
@@ -1146,6 +1159,48 @@ def _monitor_auth(name: str) -> XHSUnifiedAuth:
     return auth
 
 
+def classify_account_error(exc: Exception) -> tuple[str, str]:
+    """把抓取异常归类，决定界面该说「重新登录」还是「网络异常」。
+
+    返回 (kind, 人话)。kind 取值：
+      expired  登录态失效，需要重新扫码
+      network  网络问题，下一轮会自动重试
+      env      运行环境问题（例如 curl_cffi 版本过低），重登也没用
+      unknown  其它错误
+    """
+    text = f"{type(exc).__name__}: {exc}"
+    low = text.lower()
+
+    # 注意是 "impersonat"：报错原文是 "Impersonating chrome150 is not supported"，
+    # 里面并不包含 "impersonate"
+    if "impersonat" in low:
+        return "env", "运行环境问题：curl_cffi 版本过低（需 >=0.16.2），重新登录也没用"
+
+    # 失效的真实形态：
+    #   bootstrap user/me failed: 登录已过期        <- 会话过期
+    #   bootstrap user/me failed: JS mnsv2 签名失败  <- Cookie 已无效导致签名过不了门禁
+    # build_auth() 也会统一包一层「登录态已失效」，这里一并认掉
+    if any(
+        k in low
+        for k in (
+            "bootstrap", "user/me", "guest",
+            "登录已过期", "登录态已失效", "未返回 user_id",
+        )
+    ):
+        return "expired", "登录态已失效，需要重新扫码登录"
+
+    if any(
+        k in low
+        for k in (
+            "timeout", "timed out", "connection", "connect", "ssl",
+            "proxy", "resolve", "network", "temporarily",
+        )
+    ):
+        return "network", "网络异常，稍后会自动重试"
+
+    return "unknown", f"{type(exc).__name__}: {str(exc)[:160]}"
+
+
 def _fetch_account_state(name: str) -> dict:
     """读一个账号的未读数 + 会话列表，合成前端要的结构。"""
     from apis.xhs_live import XHSLiveAPI
@@ -1178,6 +1233,8 @@ def _fetch_account_state(name: str) -> dict:
         "chats": rows,
         "updated_at": time.time(),
         "error": "",
+        "error_kind": "",
+        "error_count": 0,
     }
 
 
@@ -1203,12 +1260,20 @@ def _monitor_loop() -> None:
                 state = _fetch_account_state(name)
             except Exception as exc:
                 _MONITOR_AUTH.pop(name, None)  # 会话可能过期，丢掉下次重建
+                kind, human = classify_account_error(exc)
+                # 连续失败两次以上才当成真的失效，避免网络抖一下就误报要重新登录
+                fails = int((prev.get("error_count") or 0) if prev else 0) + 1
+                if fails < 2 and kind in ("expired", "network", "unknown"):
+                    kind = "retry"
+                    human = f"本次抓取失败，正在重试（{human}）"
                 state = {
                     "unread_total": 0,
                     "unread": {},
                     "chats": [],
                     "updated_at": time.time(),
-                    "error": str(exc),
+                    "error": human,
+                    "error_kind": kind,
+                    "error_count": fails,
                 }
 
             # 新消息判定：未读变多，或最后消息时间前进。
