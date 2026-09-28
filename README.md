@@ -38,6 +38,28 @@
 
 ---
 
+## 界面预览
+
+### 素材库
+
+图文 / 视频素材统一管理，支持编辑与替换图片；删除会先进回收站。
+
+![素材库](./assets/screenshots/01-library.png)
+
+### 发布笔记
+
+勾选账号 → 勾选笔记 → 一键发布，支持定时、话题、地点与可见范围。
+
+![发布笔记](./assets/screenshots/02-publish.png)
+
+### 私信
+
+所有账号的未读汇总在一行，点开哪个看哪个；打开会话即自动标记已读。
+
+![私信](./assets/screenshots/03-dm.png)
+
+---
+
 ## 快速开始
 
 **环境要求**：Python 3.10+、Node.js 20+（签名算法是 JS，必须装 Node）
@@ -112,6 +134,14 @@ PR：<https://github.com/cv-cat/Spider_XHS/pull/189>
 - 群聊的已读回执未实现，目前只处理单聊。
 - 已读接口的字段上游没有文档，是实测反推的：`chat_id` 取对方的 user_id 裸值，
   `read_store_id` 取会话的 `max_store_id`。上游若修改协议，这里需要跟着调整。
+
+---
+
+## 赞助
+
+如果这个项目帮到了你，可以请作者喝杯咖啡 ☕
+
+<img src="./assets/sponsor/wechat_pay.jpg" width="280" alt="微信支付">
 
 ---
 

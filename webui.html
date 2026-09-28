@@ -354,12 +354,18 @@ async function api(path, options) {
   return data;
 }
 
+/* 页签用 hash 路由：#accounts / #library / #publish / #dm / #notify
+   好处是能直接分享或收藏某一页，手机上浏览器的后退键也能用 */
+function switchTab(name) {
+  if (!document.getElementById("panel-" + name)) name = "accounts";
+  document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("on", b.dataset.tab === name));
+  document.querySelectorAll(".panel").forEach((p) => p.classList.toggle("on", p.id === "panel-" + name));
+}
 document.querySelectorAll("nav button").forEach((btn) => {
-  btn.onclick = () => {
-    document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("on", b === btn));
-    document.querySelectorAll(".panel").forEach((p) => p.classList.toggle("on", p.id === "panel-" + btn.dataset.tab));
-  };
+  btn.onclick = () => { location.hash = btn.dataset.tab; };
 });
+window.addEventListener("hashchange", () => switchTab(location.hash.slice(1)));
+switchTab(location.hash.slice(1) || "accounts");
 
 /* ---------------- 账号 ---------------- */
 async function loadAccounts() {
