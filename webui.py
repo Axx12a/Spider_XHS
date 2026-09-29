@@ -1475,8 +1475,7 @@ def _job_cancelled(job_id: str) -> bool:
 
 def _publish_worker(
     job_id: str,
-    account_names: list[str],
-    picked: list[dict],
+    assigned: list[tuple[str, dict]],
     privacy: int,
     post_time: int | None,
     delay_min: float,
@@ -1484,7 +1483,7 @@ def _publish_worker(
 ) -> None:
     from apis.xhs_creator_apis import XHS_Creator_Apis
 
-    total = len(account_names) * len(picked)
+    total = len(assigned)
     results: list[dict] = []
 
     def record(account: str, title: str, ok: bool, message: str) -> None:
@@ -1519,7 +1518,7 @@ def _publish_worker(
     # 矩阵特征。纯随机打乱还不够：同一素材仍可能连着落到不同账号。
     # 这里用贪心，尽量保证相邻两条「素材不同、账号也不同」，
     # 让同一条笔记落到各账号的时间被摊到最开。
-    pool = [(a, m) for a in account_names for m in picked]
+    pool = list(assigned)
     random.shuffle(pool)
     tasks: list[tuple[str, dict]] = []
     last_material = last_account = None
@@ -1595,13 +1594,29 @@ def _publish_worker(
 
 @app.post("/api/publish/batch")
 def api_publish_batch(payload: dict) -> Any:
-    account_names = payload.get("accounts") or []
-    material_ids = payload.get("materials") or []
+    # 新格式：assignments = [{"name": "main", "materials": ["id1", ...]}, ...]
+    # 每个账号发自己那几条，彼此独立 —— 这是「不同账号发不同笔记」。
+    # 旧格式（accounts × materials 的笛卡尔积）继续兼容。
+    raw_assign = payload.get("assignments")
+    pairs: list[tuple[str, str]] = []
+    if raw_assign:
+        for item in raw_assign:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            for mid in item.get("materials") or []:
+                mid = str(mid).strip()
+                if mid:
+                    pairs.append((name, mid))
+    else:
+        for name in payload.get("accounts") or []:
+            for mid in payload.get("materials") or []:
+                pairs.append((str(name), str(mid)))
+    if not pairs:
+        return err("请至少为一个账号选择要发布的笔记")
     privacy = int(payload.get("privacy", 1) or 1)
-    if not account_names:
-        return err("请至少勾选一个账号")
-    if not material_ids:
-        return err("请至少勾选一条笔记")
 
     try:
         post_time = parse_schedule(payload.get("schedule_at") or "")
@@ -1617,8 +1632,8 @@ def api_publish_batch(payload: dict) -> Any:
     delay_max = max(delay_min, delay_max)
 
     pool = {m.get("id"): m for m in load_library()}
-    picked = [pool[i] for i in material_ids if i in pool]
-    if not picked:
+    assigned = [(name, pool[mid]) for name, mid in pairs if mid in pool]
+    if not assigned:
         return err("勾选的笔记在素材库里已不存在")
 
     job_id = f"{int(time.time() * 1000):x}"
@@ -1626,7 +1641,7 @@ def api_publish_batch(payload: dict) -> Any:
         PUBLISH_JOBS[job_id] = {
             "id": job_id,
             "status": "running",
-            "total": len(account_names) * len(picked),
+            "total": len(assigned),
             "done": 0,
             "succeeded": 0,
             "results": [],
@@ -1647,7 +1662,7 @@ def api_publish_batch(payload: dict) -> Any:
 
     threading.Thread(
         target=_publish_worker,
-        args=(job_id, list(account_names), picked, privacy, post_time, delay_min, delay_max),
+        args=(job_id, assigned, privacy, post_time, delay_min, delay_max),
         daemon=True,
     ).start()
     return {"ok": True, "job": dict(PUBLISH_JOBS[job_id])}

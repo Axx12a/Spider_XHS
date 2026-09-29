@@ -119,6 +119,11 @@
   .noteCard h4 { margin:0 0 6px; font-size:13px; font-weight:600; line-height:1.4; }
   .noteCard .stats { color:var(--muted); font-size:12px; display:flex; gap:10px; flex-wrap:wrap; }
   .noteCard .foot { display:flex; justify-content:space-between; align-items:center; margin-top:10px; }
+  .assignBox { border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-bottom:12px; }
+  .assignHead { display:flex; align-items:center; gap:8px; margin-bottom:10px; flex-wrap:wrap; }
+  .assignBox .pickgrid { max-height:220px; }
+  .assignBox .pick img { height:96px; }
+  .assignBox .pick .body { padding:6px 8px; font-size:12px; }
   #conflictBox { display:none; margin-top:14px; padding:14px 16px; border-radius:10px;
     border:1px solid #ffd2d8; background:#fff6f7; }
   #conflictBox b { color:var(--brand); }
@@ -438,9 +443,13 @@
       <p id="pubAccountsEmpty" class="empty">还没有账号，先去「账号」页扫码登录。</p>
     </div>
     <div class="card">
-      <h3 style="margin:0 0 10px;font-size:15px">2. 选择要发布哪些笔记</h3>
-      <div class="pickgrid" id="pubMaterials"></div>
-      <p id="pubMaterialsEmpty" class="empty">素材库是空的，先去「素材库」页新建。</p>
+      <h3 style="margin:0 0 6px;font-size:15px">2. 给每个账号选择要发的笔记</h3>
+      <p class="muted" style="margin:0 0 12px">
+        每个账号发自己那几条，互不影响（不再是「所有账号都发全部笔记」）。
+        点缩略图勾选 / 取消。选择会记住，刷新页面不会丢。
+      </p>
+      <div id="assignArea"></div>
+      <p id="assignEmpty" class="empty">先在上面勾选账号</p>
     </div>
     <div class="card">
       <h3 style="margin:0 0 10px;font-size:15px">3. 发布设置</h3>
@@ -605,7 +614,8 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const state = {
-  accounts: [], materials: [], pickedMaterials: new Set(),
+  accounts: [], materials: [],
+  assign: {},          // 账号名 -> Set(素材 id)：每个账号发哪几条
   chatUser: "", dmAccount: "", editingMaterial: "",
   noteAccounts: new Set(), noteData: {}, noteSelected: new Set(),
   monitor: {}, prevUnread: {}, monitorReady: false, matSelected: new Set(),
@@ -731,6 +741,8 @@ async function loadAccounts() {
     const label = document.createElement("label");
     label.innerHTML = `<input type="checkbox" value="${a.name}"> <b>${a.nickname||a.name}</b>
       <span class="muted">(${a.name})</span>`;
+    // 勾选账号后，下面立刻出现该账号的笔记分配区
+    label.querySelector("input").onchange = renderAssignArea;
     box.appendChild(label);
   });
 
@@ -1131,7 +1143,7 @@ async function loadMaterials() {
     };
   });
   updateMatSelBar();
-  renderPickList();
+  renderAssignArea();
 }
 
 function clearMatForm() {
@@ -1234,24 +1246,65 @@ $("btnSaveMat").onclick = async () => {
 $("btnReloadMat").onclick = loadMaterials;
 
 /* ---------------- 发布 ---------------- */
-function renderPickList() {
-  const box = $("pubMaterials"); box.innerHTML = "";
-  $("pubMaterialsEmpty").style.display = state.materials.length ? "none" : "block";
-  state.pickedMaterials = new Set(
-    [...state.pickedMaterials].filter((id) => state.materials.some((m) => m.id === id))
-  );
-  state.materials.forEach((m) => {
-    const div = document.createElement("div");
-    div.className = "pick" + (state.pickedMaterials.has(m.id) ? " on" : "");
-    const cover = m.media_type === "video"
-      ? `<div style="height:110px;display:flex;align-items:center;justify-content:center;background:#f1f3f5" class="muted">视频</div>`
-      : `<img src="/api/library/${m.id}/file/0" alt="">`;
-    div.innerHTML = `${cover}<div class="body"><b>${m.title}</b><span class="muted">${fmtTime(m.created_at*1000)}</span></div>`;
-    div.onclick = () => {
-      state.pickedMaterials.has(m.id) ? state.pickedMaterials.delete(m.id) : state.pickedMaterials.add(m.id);
-      div.classList.toggle("on");
-    };
-    box.appendChild(div);
+/* 按账号分配笔记：每个账号选自己要发的那几条，存在 localStorage 里 */
+function loadAssign() {
+  try {
+    const raw = JSON.parse(localStorage.getItem("pubAssign") || "{}");
+    Object.entries(raw).forEach(([k, v]) => { state.assign[k] = new Set(v); });
+  } catch {}
+}
+
+function saveAssign() {
+  const out = {};
+  Object.entries(state.assign).forEach(([k, v]) => { out[k] = [...v]; });
+  localStorage.setItem("pubAssign", JSON.stringify(out));
+}
+
+function selectedAccounts() {
+  return [...$("pubAccounts").querySelectorAll("input:checked")].map((i) => i.value);
+}
+
+function renderAssignArea() {
+  const names = selectedAccounts();
+  const area = $("assignArea");
+  $("assignEmpty").style.display = names.length ? "none" : "block";
+  area.innerHTML = "";
+  if (!names.length) return;
+
+  const alive = new Set(state.materials.map((m) => m.id));
+  names.forEach((name) => {
+    const acc = state.accounts.find((a) => a.name === name) || {};
+    // 素材可能已被删掉，把失效的勾选清掉
+    state.assign[name] = new Set(
+      [...(state.assign[name] || [])].filter((id) => alive.has(id))
+    );
+    const picked = state.assign[name];
+
+    const box = document.createElement("div");
+    box.className = "assignBox";
+    box.innerHTML = `<div class="assignHead">
+        <b>${acc.nickname || name}</b><span class="muted">(${name})</span>
+        <span class="tag">已选 ${picked.size} 条</span>
+      </div><div class="pickgrid"></div>`;
+    const grid = box.querySelector(".pickgrid");
+    if (!state.materials.length) {
+      grid.innerHTML = '<p class="empty">素材库是空的，先去「素材库」页新建</p>';
+    }
+    state.materials.forEach((m) => {
+      const div = document.createElement("div");
+      div.className = "pick" + (picked.has(m.id) ? " on" : "");
+      const cover = m.media_type === "video"
+        ? `<div style="height:96px;display:flex;align-items:center;justify-content:center;background:#f1f3f5" class="muted">视频</div>`
+        : `<img src="/api/library/${m.id}/file/0" alt="" loading="lazy">`;
+      div.innerHTML = `${cover}<div class="body"><b>${m.title}</b></div>`;
+      div.onclick = () => {
+        if (picked.has(m.id)) picked.delete(m.id); else picked.add(m.id);
+        saveAssign();
+        renderAssignArea();
+      };
+      grid.appendChild(div);
+    });
+    area.appendChild(box);
   });
 }
 
@@ -1305,27 +1358,38 @@ async function pollJob() {
 
 $("btnPublish").onclick = async () => {
   const msg = $("publishMsg");
-  const accounts = [...$("pubAccounts").querySelectorAll("input:checked")].map((i) => i.value);
-  const materials = [...state.pickedMaterials];
+  const accounts = selectedAccounts();
   if (!accounts.length) return showMsg(msg, "请至少勾选一个账号", false);
-  if (!materials.length) return showMsg(msg, "请至少勾选一条笔记", false);
 
+  const assignments = accounts
+    .map((name) => ({ name, materials: [...(state.assign[name] || [])] }))
+    .filter((x) => x.materials.length);
+  if (!assignments.length) return showMsg(msg, "请给至少一个账号选择要发的笔记", false);
+
+  const total = assignments.reduce((n, x) => n + x.materials.length, 0);
   const dmin = Math.max(0, Number($("pubDelayMin").value) || 0);
   const dmax = Math.max(dmin, Number($("pubDelayMax").value) || 0);
-  const total = materials.length * accounts.length;
   const estMin = Math.round((total * ((dmin + dmax) / 2 + 3)) / 60);
 
-  // 矩阵最容易触发风控的不是频率，而是「同一批内容出现在多个账号上」
+  // 同一个素材被多个账号选中 = 内容重复，这是矩阵被限流的主因
+  const counter = {};
+  assignments.forEach((x) => x.materials.forEach((id) => {
+    counter[id] = (counter[id] || 0) + 1;
+  }));
+  const dupCount = Object.values(counter).filter((n) => n > 1).length;
   let dupWarn = "";
-  if (accounts.length > 1 && materials.length > 1) {
-    dupWarn = `\n\n⚠️ 你选的是 ${materials.length} 条笔记 × ${accounts.length} 个账号，`
-      + `同一批内容会出现在多个账号上。矩阵被限流最常见的原因就是这个，`
-      + `建议给不同账号准备不同素材。`;
+  if (dupCount) {
+    dupWarn = `\n\n⚠️ 有 ${dupCount} 条笔记被 2 个以上账号同时选中。`
+      + `同一内容出现在多个账号上是矩阵被限流最常见的原因，建议不同账号用不同素材。`;
   }
+  const emptyAcc = accounts.filter((n) => !(state.assign[n] || []).size);
+  const emptyWarn = emptyAcc.length
+    ? `\n\n（${emptyAcc.join("、")} 没选笔记，会被跳过）`
+    : "";
   if (!confirm(
-    `将 ${materials.length} 条笔记发布到 ${accounts.length} 个账号，共 ${total} 次。\n`
+    `共 ${total} 次发布，涉及 ${assignments.length} 个账号。\n`
     + `每条之间随机等待 ${dmin}~${dmax} 秒，顺序随机打乱，预计约 ${estMin} 分钟完成。`
-    + dupWarn
+    + emptyWarn + dupWarn
     + `\n\n确认开始？`
   )) return;
 
@@ -1338,7 +1402,7 @@ $("btnPublish").onclick = async () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        accounts, materials,
+        assignments,
         privacy: $("pubPrivacy").value,
         schedule_at: $("pubAt").value,
         delay_min: dmin,
@@ -1864,6 +1928,8 @@ loadDingtalk();
 
 loadAccounts();
 loadMaterials();
+loadAssign();
+renderAssignArea();
 loadAiConfig();
 updateNotifyBtn();
 connectEvents();
